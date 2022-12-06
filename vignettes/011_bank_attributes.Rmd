@@ -1,0 +1,715 @@
+---
+title: "Bank Attributes"
+author: "Jason M. Gleditsch^[Temple University, jmg5214@gmail.com]"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+  pdf_document:
+    toc: TRUE
+    toc_depth: 3
+---
+
+# Aim and Scope
+
+Here we calculate the geographic, landscape, and economic attributes for island banks in the Caribbean Bioregion as delineated by Hedges et al. (2019) and including Bermuda.
+
+First we need to load in the `caribmacro` package.
+
+```{r project pkg, message = FALSE}
+# Project package
+library(caribmacro)
+
+```
+
+If you do not have this package installed, then run `devtools::load_all` in order to load all of the necessary functions if you are running this code in the caribmacro R project in the shared folder. If you are not, then see the functions vignette for the Functions needed.
+
+```{r project functions, eval = FALSE, message = FALSE}
+# Load all of the functions of the caribmacro package
+devtools::load_all("./", export_all = FALSE)
+
+## Function needed ##
+#   'isolation'  -> calculates the isolation metric(s)
+#   'factorize'  -> turns character columns of a data frame into factors
+```
+
+The other R packages needed for this are:
+
+```{r required packages, message = FALSE}
+library(here)
+library(reshape)
+library(readr)
+library(pwr)
+
+# Spatial Packages
+library(sf)
+library(rgeos)
+
+# Analytical Packages
+library(FactoMineR)
+
+# Diversity Database Packages
+library(taxize)
+
+# Phylogenetic Packages
+library(ape)
+library(phyr)
+
+# Graphing Packages
+library(ggplot2)
+library(gridExtra)
+```
+
+# Bank Attributes
+## Bank Geography
+
+In order to determine the island bank (hereafter, bank) land area, number of islands, and island spread, we need to load in the Caribbean island and bank shapefiles from the 'data_raw' folder in the 'caribmacro' package.
+
+```{r shp code, eval = FALSE, message=FALSE}
+# loading data
+carib.isl <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Islands.shp'))
+carib.bnk <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Banks.shp'))
+```
+
+
+```{r shp load, include = FALSE}
+carib.isl <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Islands.shp'))
+carib.bnk <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Banks.shp'))
+```
+
+The in order to be able to calculate the bank area, we need to re-project the shapefiles into the Lambert Azimuthal Equal Area projection centered in the Caribbean. Then, we must change the type of object to a spatial object.
+
+```{r shp projection}
+# Re-project into Lambert Azimuthal Equal Area centered in the Caribbean
+carib.isl <- st_transform(carib.isl, "+proj=laea +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+carib.bnk <- st_transform(carib.bnk, "+proj=laea +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+
+# Change 'carib.isl' and 'carib.bnk' to class 'Spatial'
+carib.isl <- as(carib.isl, Class = "Spatial")
+carib.bnk <- as(carib.bnk, Class = "Spatial")
+
+```
+
+Before we calculate the land area of each bank lets create a maximum convex polygon (MCP) around each bank in order to calculate the spread of each bank's islands.
+
+```{r bank mcp}
+bnk.mcp <- gConvexHull(carib.bnk, byid = TRUE)
+
+bnk.mcp.sf <- st_as_sf(bnk.mcp)
+bnk.mcp.sf$bank <- st_as_sf(carib.bnk)$bank
+```
+
+Let's now take a look at these MCPs to see if they look appropriate.
+
+```{r mcp plot, echo = FALSE, fig.height = 7, fig.width = 7, fig.align="center"}
+ggplot() +
+    geom_sf(data = bnk.mcp.sf, fill = 'red', color = 'black') +
+    geom_sf(data = st_as_sf(carib.bnk), fill = 'azure2', color = 'grey20') +
+    xlab('Longitude') + 
+    ylab('Latitude') +
+    labs(title = 'Banks with their AOE', 
+         subtitle = expression('(Red = AOE; Gray = Bank)'))
+
+```
+
+Now we calculate the bank area using the Islands shapefile.
+
+```{r bank area}
+carib.isl.sf <- st_as_sf(carib.isl)
+isl.area <- data.frame(bank = carib.isl.sf$bank, Area = as.numeric(st_area(carib.isl.sf)))
+
+bnk.area <- aggregate(Area ~ bank, data = isl.area, sum)
+
+```
+
+With the bank area we then determine the area of the MCPs (i.e. area of extent, hereafter AOE) and use that to calculate the island spread of each bank by dividing the bank area by the AOE and subtracting that from one. We also will determine the number of islands in each bank and combine all of this into one data frame, 'X'.
+
+```{r bank AOE-spread-island num}
+X <- data.frame(bank = bnk.mcp.sf$bank, AOE = as.numeric(st_area(bnk.mcp.sf)))
+
+X <- merge(bnk.area, X, by='bank', all=TRUE)
+
+X$Area <- X$Area/1000000 #divide by 1E6 to convert to km^2
+X$AOE <- X$AOE/1000000   #divide by 1E6 to convert to km^2
+
+X$Spread <- 1 - (X$Area/X$AOE) #'1 - ' so large values = more spread
+
+isl.area$Number <- 1
+X <- merge(X, aggregate(Number ~ bank, data = isl.area, sum), by='bank', all=TRUE)
+
+```
+
+Now let's look at the distribution of the bank area and island spread variables.
+
+```{r area_spread dist, echo = FALSE, fig.height = 12, fig.width = 7, fig.align="center"}
+tmp <- X
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$Area)])
+tmp$Area.km <- tmp$Area
+area <- ggplot(tmp, aes(x = bank, y = Area.km)) +
+          geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+          coord_flip() +
+          scale_y_continuous(position = "right")
+
+tmp$log.Area <- log(tmp$Area)
+area.dist <- ggplot(tmp, aes(x = log.Area)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               ylab("Density") +
+               xlab("log(Area)")
+
+tmp <- X
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$Spread)])
+sprd <- ggplot(tmp, aes(x = bank, y = Spread)) +
+          geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+          coord_flip() +
+          scale_y_continuous(position = "right") +
+          theme(axis.title.y = element_blank())
+
+sprd.dist <- ggplot(tmp, aes(x = Spread)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               xlab("Island Spread") +
+               theme(axis.title.y = element_blank())
+
+grid.arrange(grobs = list(area, sprd, area.dist, sprd.dist), ncol = 2,
+             heights = c(10, 2))
+
+```
+
+
+## Bank Landcover and Elevation
+
+Now let's start to incorporate other bank attributes into the bank data for use in the analysis. Let's start by loading in the bank elevation and land cover data. This data was exported from Google Earth Engine using the ecoEE module (Helmus et al 2020; JavaScript scripts can be found at the project [GitHub page](https://github.com/gledits2/caribmacro) or within the [Earth Engine](earth_engine.html) vignette). The bank elevation data was extracted from a SRTM digital elevation model (http://srtm.csi.cgiar.org), and the land cover data was extracted from the MODIS Land Cover Type Yearly Global 500m data set (DOI: 10.5067/MODIS/MCD12Q1.006) using the Annual International Geosphere-Biosphere Programme (IGBP) classification. We then combine the elevation data with the previously calculated bank geographic data, and the land cover data to create a new 'lndcvr' data frame.
+
+For the land cover we combine the "Cropland" and "Urban" values to get percent anthropogenic land cover. Similarly, we combine "Evr_Needle", "Grassland", "Wetland", "Evr_Broad", "Dec_Needle", "Dec_Broad", "Mixed_For", "C_Shrub", "O_Shrub", "W_Savanna", and "Savanna" to get percent green land cover (i.e. 'natural'). Additionally, pixels that were made up of mosaics of small-scale cultivation 40-60% with natural tree, shrub, or herbaceous vegetation were given the classification as "Crp_Nat", half of which was added to percent green cover and half added to anthropogenic land cover.
+
+For small banks, the pixels may have been determined as permanent wetland when they were actually urban due to the small area of the landmass (i.e. the ocean made the pixel permanently inundated with 30-60% water cover). Because of this, we "ground-truthed" the data for the smaller banks ($\leq$ 100km^2^) by looking at the most recent Google Earth images of the bank and comparing with the raster data to see if pixels erroneously determined as permanent wetland. If the pixel had mostly buildings in it then the pixel was added to "Urban" and removed from "Wetland". An example of this is Bermuda which is considered almost entirely permanent wetland when in fact most of the land area has urban development.
+
+```{r bank elev and land cover}
+# Bank Elevation
+elev <- read.csv(file.path(here(), 'data_raw', 'IBT_Bank_Elevation_final.csv'), header = TRUE)
+names(elev)[which(names(elev) != 'bank')] <- paste('DEM', names(elev)[which(names(elev) != 'bank')], sep = '.')
+
+X <- merge(X, elev[, c('bank', 'DEM.max', 'DEM.mean', 'DEM.sd')], by = 'bank', all = TRUE)
+X <- X[order(X$bank), ]
+
+# Bank land cover
+igb_lc <- read.csv(file.path(here(), 'data_raw', 'IBT_Landcover_IGBP_final.csv'), header = TRUE)
+
+igb_lc$anthro <- rowSums(igb_lc[, c("Cropland", "Urban")])
+igb_lc$anthro <- (0.5 * igb_lc[, "Crp_Nat"]) + igb_lc$anthro
+
+igb_lc$green <- rowSums(igb_lc[, c("Evr_Needle", "Grassland", 'Wetland', "Evr_Broad", "Dec_Needle", 
+                                    "Dec_Broad", "Mixed_For", "C_Shrub", "O_Shrub", 
+                                    "W_Savanna", "Savanna")])
+igb_lc$green <- (0.5 * igb_lc[, "Crp_Nat"]) + igb_lc$green
+
+lndcvr <- igb_lc[, c('bank', 'anthro', 'green')]
+lndcvr <- lndcvr[order(lndcvr$bank), ]
+```
+
+Let's look at the distribution of the land cover variables as well.
+
+```{r lndcvr dist, echo = FALSE, fig.height = 12, fig.width = 7, fig.align="center"}
+tmp <- droplevels(lndcvr[!is.na(lndcvr$anthro), ])
+tmp <- tmp[order(tmp$bank), ]
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$anthro)])
+anth <- ggplot(tmp, aes(x = bank, y = anthro)) +
+          geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+          xlab('Bank') + ylab('Anthopogenic Lancover (%)') +
+          coord_flip() +
+          scale_y_continuous(position = "right")
+
+anth.dist <- ggplot(tmp, aes(x = anthro)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               ylab("Density") +
+               xlab('Anthopogenic Lancover (%)')
+
+tmp <- droplevels(lndcvr[!is.na(lndcvr$green), ])
+tmp <- tmp[order(tmp$bank), ]
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$green)])
+grn <- ggplot(tmp, aes(x = bank, y = green)) +
+         geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+         xlab('Bank') + ylab('"Natural" Lancover (%)') +
+         coord_flip() +
+         scale_y_continuous(position = "right") +
+         theme(axis.title.y = element_blank())
+
+grn.dist <- ggplot(tmp, aes(x = green)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               xlab('"Natural" Lancover (%)') +
+               theme(axis.title.y = element_blank())
+
+grid.arrange(grobs = list(anth, grn, anth.dist, grn.dist), ncol = 2,
+             heights = c(10, 2))
+
+cat('Banks with no land cover data: \n', 
+    paste(setdiff(levels(as.factor(lndcvr$bank)), levels(as.factor(tmp$bank))),
+    collapse = " | "))
+```
+
+We also should look at the distribution on the various elevation distributions.
+
+```{r elev dist, echo = FALSE, fig.height = 12, fig.width = 7, fig.align="center"}
+tmp <- X
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$DEM.max)])
+max <- ggplot(tmp, aes(x = bank, y = DEM.max)) +
+          geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+          xlab('Bank') + ylab('Maximum Elevation (m)') +
+          coord_flip() +
+          scale_y_continuous(position = "right") +
+          theme(axis.title.x = element_blank(),
+               axis.text.x = element_text(angle = 45, hjust = 0.5))
+
+
+max.dist <- ggplot(tmp, aes(x = DEM.max)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               ylab("Density") +
+               xlab('Maximum Elevation (m)')
+
+tmp <- X
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$DEM.sd)])
+sd <- ggplot(tmp, aes(x = bank, y = DEM.sd)) +
+         geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+         xlab('Bank') + ylab('Terrain Variability (sd(DEM))') +
+         coord_flip() +
+         scale_y_continuous(position = "right") +
+         theme(axis.title.y = element_blank(),
+               axis.title.x = element_blank(),
+               axis.text.x = element_text(angle = 45, hjust = 0.5))
+
+sd.dist <- ggplot(tmp, aes(x = DEM.sd)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               xlab('Terrain Variability (sd(DEM))') +
+               theme(axis.title.y = element_blank())
+
+tmp <- X
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$DEM.mean)])
+avg <- ggplot(tmp, aes(x = bank, y = DEM.mean)) +
+         geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+         xlab('Bank') + ylab('Average Elevation (m)') +
+         coord_flip() +
+         scale_y_continuous(position = "right") +
+         theme(axis.title.y = element_blank(),
+               axis.title.x = element_blank(),
+               axis.text.x = element_text(angle = 45, hjust = 0.5))
+
+avg.dist <- ggplot(tmp, aes(x = DEM.mean)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               xlab('Average Elevation (m)') +
+               theme(axis.title.y = element_blank())
+
+grid.arrange(grobs = list(max, sd, avg, max.dist, sd.dist, avg.dist), ncol = 3,
+             heights = c(10, 2))
+```
+
+
+## Bank Isolation
+
+Bank isolation was calculated in a similar way as Helmus (2014) (DOI: 10.1038/nature13739). For this we will use the distances from the centroids of each bank, and then using that distance matrix calculate the isolation metrics by determining the principle components from a principle components anlysis (PCA) of selected square-root transformed distances to to other banks and source(s). 
+
+For the distances between the banks we will be using the bank centroids, so let's load in the centroids and take a look at there placement.
+
+```{r bank centroids, eval = FALSE}
+cent <- st_read(file.path(here(), 'data_raw', 'gis', 'Centroids_Bank_Main.shp'))
+map <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Banks_w_Mainland.shp'))
+```
+
+```{r centroids load, include = FALSE}
+cent <- st_read(file.path(here(), 'data_raw', 'gis', 'Centroids_Bank_Main.shp'))
+map <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Banks_w_Mainland.shp'))
+```
+
+```{r centroids plot, echo = FALSE, fig.height = 5, fig.width = 6.5, fig.align="center"}
+tmp <- cent[which(cent$bank != 'central america' &
+                    cent$bank != 'north america' &
+                    cent$bank != 'south america' &
+                    cent$bank != 'hispaniola' &
+                    cent$bank != 'cuba'), ]
+
+ggplot() +
+    geom_sf(data = map, fill = 'azure2', color = 'black') +
+    geom_sf(data = tmp, fill = 'red', color = 'black', shape = 21) +
+    xlab('Longitude') + 
+    ylab('Latitude') +
+    ggtitle('Bank and Mainland Centroids')
+
+```
+
+The placement of the centroids look good so now lets calculate the distance matrix that will hold all of the distances between the banks.
+
+```{r bank distance}
+cent <- st_transform(cent, "+proj=aeqd +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+
+cent.dist <- st_distance(x = cent, y = cent, by_element = FALSE)
+
+cent.dist <- data.frame(cent.dist)
+names(cent.dist) <- gsub(' ', '.', cent$bank)
+cent.dist$bank <- cent$bank
+row.names(cent.dist) <- gsub(' ', '.', cent.dist$bank)
+cent.dist <- cent.dist[order(cent.dist$bank), c('bank', sort(names(cent.dist)[which(names(cent.dist) != 'bank')]))]
+
+for (i in 2:ncol(cent.dist)) {
+  cent.dist[, i] <- as.numeric(cent.dist[, i])
+}
+
+```
+
+However, it makes more sense to use the shoreline of the mainland instead of centroids. That would ensure that island banks such as Trinidad are not considered isolated from the mainland even though it's centroid is one of the closest to the South American shoreline. To do this we will have to load in another shapefile with the shorelines of North America, Central America, and South America and find the distance from all of the bank centroids to the the shoreline of the mainland. Those distances then need to be merged with the centroid distance matrix made above and the distance to the mainland centroids removed.
+
+```{r shoreline, eval = FALSE}
+# Load the shapefile for the mainland shoreline
+main.shor<-st_read(file.path(here(), 'data_raw', 'gis', 'Cont_Main_WGS_Merc.shp'))
+main.shor <- st_transform(main.shor, "+proj=aeqd +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+```
+
+```{r shore load, include = FALSE}
+main.shor<-st_read(file.path(here(), 'data_raw', 'gis', 'Cont_Main_WGS_Merc.shp'))
+main.shor <- st_transform(main.shor, "+proj=aeqd +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+
+```
+
+```{r shore dist}
+dist.shor <- st_distance(x = cent, y = main.shor, by_element = FALSE)
+
+dist.shor <- data.frame(dist.shor)
+names(dist.shor) <- gsub(' ', '.', main.shor$Isl_Name)
+dist.shor$bank <- cent$bank
+dist.shor <- dist.shor[order(dist.shor$bank), c('bank', sort(names(dist.shor)[which(names(dist.shor) != 'bank')]))]
+
+for (i in 2:ncol(dist.shor)) {
+  dist.shor[, i] <- as.numeric(dist.shor[, i])
+}
+
+dist.shor <- merge(cent.dist, dist.shor, by = 'bank', all = TRUE)
+names(dist.shor) <- gsub('.y', '', names(dist.shor), fixed = TRUE)
+shor.dist <- dist.shor[, intersect(names(cent.dist), names(dist.shor))]
+```
+
+For the Caribbean herpetofauna, South America was the main source for the immigration of species to the islands. However, work done with *Anolis* lizards has shown that many of the *Anolis* communities of the southern Greater Antilles and northern Lesser Antilles actually came from Cuba and Hispanola. Both of these banks are quite large being almost an order of magnitude greater in size than the next largest bank and seemed to have acted as a source for many of the surrounding islands. Therefore, in the same manner as the mainland, it makes sense to measure distance to these banks as distance to the shoreline of their main islands instead of their centroids.
+
+```{r source shoreline, eval = FALSE}
+# Load the shapefile for the Cuba and Hispaniola shoreline
+sorc.shor<-st_read(file.path(here(), 'data_raw', 'gis', 'Cuba_Hisp_Shore.shp'))
+sorc.shor <- st_transform(sorc.shor, "+proj=aeqd +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+
+```
+
+```{r source load, include = FALSE}
+# Load the shapefile for the Cuba and Hispaniola shoreline
+sorc.shor<-st_read(file.path(here(), 'data_raw', 'gis', 'Cuba_Hisp_Shore.shp'))
+sorc.shor <- st_transform(sorc.shor, "+proj=aeqd +x_0=0 +y_0=0 +lon_0=-72 +lat_0=20")
+
+```
+
+```{r source dist}
+dist.sorc <- st_distance(x = cent, y = sorc.shor, by_element = FALSE)
+
+dist.sorc <- data.frame(dist.sorc)
+names(dist.sorc) <- gsub(' ', '.', sorc.shor$bank)
+dist.sorc$bank <- cent$bank
+dist.sorc <- dist.sorc[order(dist.sorc$bank), c('bank', sort(names(dist.sorc)[which(names(dist.sorc) != 'bank')]))]
+
+for (i in 2:ncol(dist.sorc)) {
+  dist.sorc[, i] <- as.numeric(dist.sorc[, i])
+}
+
+dist.sorc <- merge(shor.dist, dist.sorc, by = 'bank', all = TRUE)
+names(dist.sorc) <- gsub('.y', '', names(dist.sorc), fixed = TRUE)
+sorc.dist <- dist.sorc[, intersect(names(cent.dist), names(dist.sorc))]
+
+row.names(sorc.dist) <- gsub(' ', '.', sorc.dist$bank)
+dist <- sorc.dist[, names(sorc.dist)[which(names(sorc.dist) != 'bank')]]
+```
+
+Now that we have the distances between each bank and the distances between the banks and the mainland, we can calculate the isolation metrics. We will do this by using the `isolation()` function in the 'caribmacro' package which calculates the isolation metrics in the manner described above. For the calculation of island bank isolation we will be using the square root transformed minimum distance to an immigration source (Cuba, Hispaniola, and South and Central America), to another bank (including the mainland), and to a bank of equal or larger size. 
+
+We are including Central America as a possible source because the island banks off the coast of Central America (e.g. Cozumel) have herpetofaunal communities that have likely arose from the Central American clades. Additionally, since our sources and the mainland areas overlap quite a bit, we are not including the minimum distance to the mainland as one of the distances used in the calculation of this metric.
+
+```{r bank isolation 1}
+main <- c('central.america', 'north.america', 'south.america')
+src <- c('cuba', 'hispaniola', 'south.america', 'central.america')
+
+bnk.area$bank <- gsub(' ', '.', bnk.area$bank)
+
+system.time(iso <- isolation(dist = dist,
+                             source = src,
+                             main = main,
+                             larger = TRUE,
+                             area = bnk.area,
+                             min = TRUE,
+                             sum = FALSE,
+                             d.main = FALSE,
+                             export.dist = TRUE))
+
+# Check the loadings and eigenvalues of the PCA
+iso[['Variance']]
+iso[['Loadings']]
+
+```
+
+The loadings for PC1 suggest it represents overall isolation, and the loadings for PC2 suggest it represents isolation from one of the main immigration sources. 
+
+Let's look at the banks' isolation metrics (PC1 and PC2) to see if they make sense.
+
+```{r iso plots 1, echo = FALSE, fig.height = 8, fig.width = 8, fig.align="center"}
+tmp <-  iso[['Components']][, c('bank', 'PC1', 'PC2', 'PC3')]
+
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$PC1)])
+iso1 <- ggplot(tmp, aes(x = bank, y = PC1)) +
+          geom_bar(aes(fill = PC1), stat = 'identity', width=.8, color = "black") +
+          xlab('Bank') + ylab('ISO PC1') +
+          coord_flip() +
+          scale_fill_gradient(low = "navy", high = "red") +
+          scale_y_continuous(position = "right") +
+          theme(legend.position="none")
+
+tmp <-  iso[['Components']][, c('bank', 'PC1', 'PC2', 'PC3')]
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$PC2)])
+iso2 <- ggplot(tmp, aes(x = bank, y = PC2)) +
+          geom_bar(aes(fill = PC2), stat = 'identity', width=.8, color = "black") +
+          xlab('Bank') + ylab('ISO PC2') +
+          coord_flip() +
+          scale_fill_gradient(low = "navy", high = "red") +
+          scale_y_continuous(position = "right")
+
+grid.arrange(grobs = list(iso1, iso2), ncol = 2,
+             heights = 8, widths = c(3.75, 4.25))
+
+```
+
+```{r iso maps 1, echo = FALSE, fig.height = 12, fig.width = 8, fig.align="center"}
+temp <- st_as_sf(carib.bnk)
+iso.pcs <- iso[['Components']][, c('bank', 'PC1', 'PC2', 'PC3')]
+iso.pcs$bank <- gsub('.', ' ', iso.pcs$bank,  fixed = TRUE)
+tmp <- merge(temp, iso.pcs, by = 'bank', all = TRUE)
+
+iso1.map <- ggplot() +
+              geom_sf(data = map, fill = 'grey80', color = 'black') +
+              geom_sf(data = tmp, aes(fill = PC1), color = 'black') +
+              scale_fill_gradient(low = "navy", high = "red") +
+              coord_sf(xlim = c(-89, -58), ylim = c(9.5, 33), expand = FALSE) +
+              xlab('Longitude') + 
+              ylab('Latitude') +
+              ggtitle('ISO PC1') +
+              theme(legend.position="none",
+                    axis.title.y = element_blank(),
+                    axis.title.x = element_blank())
+
+iso2.map <- ggplot() +
+              geom_sf(data = map, fill = 'grey80', color = 'black') +
+              geom_sf(data = tmp, aes(fill = PC2), color = 'black') +
+              scale_fill_gradient(low = "navy", high = "red") +
+              coord_sf(xlim = c(-89, -58), ylim = c(9.5, 33), expand = FALSE) +
+              xlab('Longitude') + 
+              ylab('Latitude') +
+              ggtitle('ISO PC2') +
+              theme(legend.position="none",
+                    axis.title.y = element_blank(),
+                    axis.title.x = element_blank())
+
+grid.arrange(grobs = list(iso1.map, iso2.map), nrow = 2,
+             heights = c(8, 8))
+
+```
+
+From these plots, the metrics do seem to make overall sense. However, there are clearly some outliers (Bermuda for PC1 and Cuba and Hispaniola for PC2). Additionally, Bermuda, which should be the most isolated for both PC1 and PC2, is considered less isolated from a source than most (if not all) the Lesser Antilles.
+
+Therefore, it may make sense to just use the actual distances (square root transformed) as our metrics for isolation. This is especially true since we are only using three distances in the PCA anyway. First let's see just how correlated all of the possible distances are so that we can see if we will have any collinearity issues in our analyses.
+
+```{r dist cor}
+round(cor(iso[['Distances']][, c('sum', 'min', 'main', 'source', 'larger')]), 3)
+```
+
+The only distances that have a correlation over 0.6 is the distance to a larger bank and the distance to nearest bank. So we could use any of the others and either one of the ones that are highly correlated. Let's select the distance to a source, nearest bank, and the mainland for right now and see how these values are distribute across the banks.
+
+```{r iso plots 2, echo = FALSE, fig.height = 8, fig.width = 12, fig.align="center"}
+tmp <-  iso[['Distances']][, c('bank', 'main', 'source', 'min')]
+
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$source)])
+iso1 <- ggplot(tmp, aes(x = bank, y = source)) +
+          geom_bar(aes(fill = source), stat = 'identity', width=.8, color = "black") +
+          xlab('Bank') + ylab(expression(sqrt('Dist. to Source'))) +
+          coord_flip() +
+          scale_fill_gradient(low = "navy", high = "red") +
+          scale_y_continuous(position = "right") +
+          theme(legend.position="none")
+
+tmp <-  iso[['Distances']][, c('bank', 'main', 'source', 'min')]
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$min)])
+iso2 <- ggplot(tmp, aes(x = bank, y = min)) +
+          geom_bar(aes(fill = min), stat = 'identity', width=.8, color = "black") +
+          xlab('Bank') + ylab(expression(sqrt('Dist. to Another Bank'))) +
+          coord_flip() +
+          scale_fill_gradient(low = "navy", high = "red") +
+          scale_y_continuous(position = "right") +
+          theme(legend.position="none")
+
+tmp <-  iso[['Distances']][, c('bank', 'main', 'source', 'min')]
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$main)])
+iso3 <- ggplot(tmp, aes(x = bank, y = main)) +
+          geom_bar(aes(fill = main), stat = 'identity', width=.8, color = "black") +
+          xlab('Bank') + ylab(expression(sqrt('Dist. to Mainland'))) +
+          coord_flip() +
+          scale_fill_gradient(low = "navy", high = "red") +
+          scale_y_continuous(position = "right")
+
+grid.arrange(grobs = list(iso1, iso2, iso3), ncol = 3,
+             heights = 8, widths = c(3.75, 3.75, 4.25))
+
+```
+
+```{r iso maps 2, echo = FALSE, fig.height = 21, fig.width = 8, fig.align="center"}
+temp <- st_as_sf(carib.bnk)
+iso.dists <- iso[['Distances']][, c('bank', 'main', 'source', 'min')]
+iso.dists$bank <- gsub('.', ' ', iso.dists$bank,  fixed = TRUE)
+tmp <- merge(temp, iso.dists, by = 'bank', all = TRUE)
+
+iso1.map <- ggplot() +
+              geom_sf(data = map, fill = 'grey80', color = 'black') +
+              geom_sf(data = tmp, aes(fill = source), color = 'black') +
+              scale_fill_gradient(low = "navy", high = "red") +
+              coord_sf(xlim = c(-89, -58), ylim = c(9.5, 33), expand = FALSE) +
+              xlab('Longitude') + 
+              ylab('Latitude') +
+              ggtitle(expression(sqrt('Dist. to Source'))) +
+              theme(legend.position="none",
+                    axis.title.y = element_blank(),
+                    axis.title.x = element_blank())
+
+iso2.map <- ggplot() +
+              geom_sf(data = map, fill = 'grey80', color = 'black') +
+              geom_sf(data = tmp, aes(fill = min), color = 'black') +
+              scale_fill_gradient(low = "navy", high = "red") +
+              coord_sf(xlim = c(-89, -58), ylim = c(9.5, 33), expand = FALSE) +
+              xlab('Longitude') + 
+              ylab('Latitude') +
+              ggtitle(expression(sqrt('Dist. to Another Bank'))) +
+              theme(legend.position="none",
+                    axis.title.y = element_blank(),
+                    axis.title.x = element_blank())
+
+iso3.map <- ggplot() +
+              geom_sf(data = map, fill = 'grey80', color = 'black') +
+              geom_sf(data = tmp, aes(fill = main), color = 'black') +
+              scale_fill_gradient(low = "navy", high = "red") +
+              coord_sf(xlim = c(-89, -58), ylim = c(9.5, 33), expand = FALSE) +
+              xlab('Longitude') + 
+              ylab('Latitude') +
+              ggtitle(expression(sqrt('Dist. to Mainland'))) +
+              theme(legend.position="none",
+                    axis.title.y = element_blank(),
+                    axis.title.x = element_blank())
+
+grid.arrange(grobs = list(iso1.map, iso2.map, iso3.map), nrow = 3,
+             heights = c(7, 7, 7))
+
+```
+
+From these plots we can see that these distances tell us exactly what we want to show with our isolation metrics without any strange things happening for particular island banks. Additionally, we can see that the distance to nearest bank and distance to a source both approximately mirror PC1 (r = `r round(cor(iso[["Components"]][["PC1"]], iso[["Distances"]][["min"]]), 2)`) and PC2 (r = `r round(cor(iso[["Components"]][["PC2"]], iso[["Distances"]][["source"]]), 2)`), respectively. That means that if we run into issues where the slight correlation between our distances muddies any relationship we see, we can always use the PCs as isolation metrics.
+
+
+## Bank Economic Data
+
+Now we will read in the banks' economic data. These data are the number of shipment to and from various Caribbean banks as recorded by [Lloyd's of London](https://www.lloyds.com/) for 4 separate years (1979, 1991, 2003, and 2015). 
+
+We will also be using population estimates for each bank from the Gridded Population of the World Version 4.11 (DOI: 10.7927/H4JW8BX5). The Gridded Population data set includes estimates of population counts for 30 arc-second pixels for the years 2000, 2005, 2010, 2015, and 2020. The estimates for the Caribbean banks were extracted using Google Earth Engine (JavaScript scripts can be found at the project [GitHub page](https://github.com/gledits2/caribmacro)). We then will take the average of the five years of estimates and use that in our analyses.
+
+For these data we will assume that any `NA` values represent zeros. In the dataset, an `NA` means that there was no recorded visits to that particular bank by a vessel tracked by Lloyd's. Therefore, assuming that `NA` values represent zeros is valid when only considering vessels tracked by by Lloyd's. The acceptability for of this for bank population may not be as good given that some of the banks may have land areas less than a 30 arc-second pixel, and therefore, no data was extracted for that bank. However, given the size of these banks, it is likely that the permanent populations of the banks are very small if not zero.
+
+To determine the maximum number of ships for each bank we will have to use another function created for the 'caribmacro' package. This function is `row_max()` and calculates the maximum value in each row of a data frame.
+
+```{r bank economic}
+bank_e <- read.csv(file.path(here(), 'data_raw', 'IBT_Lloyd_Bank_Degree_v0.csv'), header = TRUE)
+bank_e <- bank_e[, c("bank", "to_1979", "to_1991", "to_2003", "to_2015", "to_total")]
+
+for (i in 1:ncol(bank_e)) {
+  bank_e[is.na(bank_e[, i]), i] <- 0
+}
+
+bank_e$ships_avg <- rowMeans(bank_e[, c("to_1979", "to_1991", "to_2003", "to_2015")], na.rm = TRUE)
+bank_e$ships_max <- row_max(bank_e[, c("to_1979", "to_1991", "to_2003", "to_2015")], na.rm = TRUE)
+
+names(bank_e)[which(names(bank_e) == 'to_total')] <- 'ships'
+bank_e$bank <- as.factor(bank_e$bank)
+
+pop <- read.csv(file.path(here(), 'data_raw', 'IBT_Bank_Population_v0.csv'), header = TRUE)
+
+bank_e <- merge(bank_e, pop, by = 'bank', all = TRUE)
+
+econ <- bank_e[, c('bank', 'ships', 'pop_avg')]
+
+```
+
+```{r ship cor}
+cor(bank_e[, c('ships', 'ships_avg', 'ships_max')], use = "pairwise.complete.obs")
+```
+
+Since the maximum, average, and total number of ships that visited each bank during those four years are all correlated with each other we will just use the total number of ships since it is a better representation of the possibility of species introductions due to trade in recent history.
+
+Let's look at the distribution of some of these variables.
+
+```{r econ dist, echo = FALSE, fig.height = 12, fig.width = 7, fig.align="center"}
+tmp <- econ
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$pop_avg)])
+pop <- ggplot(tmp, aes(x = bank, y = pop_avg)) +
+          geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+          xlab('Bank') + ylab('Population') +
+          coord_flip() +
+          scale_y_continuous(position = "right") +
+          theme(axis.title.x = element_blank(),
+               axis.text.x = element_text(angle = 45, hjust = 0.5))
+
+
+pop.dist <- ggplot(tmp, aes(x = pop_avg)) +
+               geom_density(alpha = 0.3, fill = "blue") +
+               ylab("Density") +
+               xlab('Population')
+
+tmp <- econ
+tmp$bank <- factor(tmp$bank, levels(as.factor(tmp$bank))[order(tmp$ships)])
+ships <- ggplot(tmp, aes(x = bank, y = ships)) +
+           geom_bar(stat = 'identity', width=.8, color = "black", fill = "darkslategray", alpha = 0.6) +
+           xlab('Bank') + ylab('Num. of Ships (Lloyd)') +
+           coord_flip() +
+           scale_y_continuous(position = "right") +
+           theme(axis.title.y = element_blank(),
+                 axis.title.x = element_blank(),
+                 axis.text.x = element_text(angle = 45, hjust = 0.5))
+
+ships.dist <- ggplot(tmp, aes(x = ships)) +
+                geom_density(alpha = 0.3, fill = "blue") +
+                xlab('Num. of Ships (Lloyd)') +
+                theme(axis.title.y = element_blank())
+
+grid.arrange(grobs = list(pop, ships, pop.dist, ships.dist), ncol = 2,
+             heights = c(10, 2))
+```
+
+## Bank Data
+
+Now let's combine all of the bank data into a single data frame.
+
+```{r bank data}
+X$bank <- gsub(' ', '.', X$bank)
+bank_dat <- merge(X, iso[['Components']][, c('bank', 'PC1', 'PC2')], by = 'bank', all = TRUE)
+names(bank_dat)[which(names(bank_dat) == 'PC1' | names(bank_dat) == 'PC2')] <- c('iso.PC1', 'iso.PC2')
+
+bank_dat <- merge(bank_dat, iso[['Distances']][, c('bank', 'min', 'main', 'source')], by = 'bank', all = TRUE)
+
+lndcvr$bank <- gsub(' ', '.', lndcvr$bank)
+bank_dat <- merge(bank_dat, lndcvr, by = 'bank', all = TRUE)
+
+econ$bank <- gsub(' ', '.', econ$bank)
+bank_dat <- merge(bank_dat, econ, by = 'bank', all = TRUE)
+
+```
+
+The `bank_dat` data frame now holds all of the data we may need for the island biogeographic analysis and needs to be exported to the 'data_out' folder. Additionally, we should export the information of the isolation PCAs to the 'supp_info' folder in the 'data_out' folder. Once these data are exported, we can then remove the objects loaded into R for the determination of the bank attributes.
+
+```{r bank readout and cleanup, warning = FALSE}
+write.csv(bank_dat, file.path(here(), 'data_out', 'IBT_Bank_Data.csv'), row.names = FALSE)
+
+write.csv(iso[['Variance']], file.path(here(), 'data_out', 'supp_info', 'IBT_ISO_PCA_Var.csv'), row.names=FALSE)
+write.csv(iso[['Loadings']], file.path(here(), 'data_out', 'supp_info', 'IBT_ISO_PCA_Load.csv'), row.names=FALSE)
+
+```

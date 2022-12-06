@@ -1,0 +1,928 @@
+---
+title: "caribmacro Functions"
+author: "Jason M. Gleditsch^[Temple University, jmg5214@gmail.com]"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float:
+      collapsed: TRUE
+---
+
+## Aim and Scope
+
+Here we describe the use of the functions in the caribmacro project package. We will not go through all of the arguments (see function documentation for that), but rather describe the common uses of the functions and briefly how the functions work where warranted. Importantly, we include the code for each function here so that anyone can see the inner workings of the functions and use these functions without having to download the caribmacro package or go to the project git page.
+
+<center>
+*** $\underline{\space\space THIS \space\space VIGNETTE \space\space IS \space\space STILL \space\space UNDER \space\space CONSTRUCTION \space\space}$ ***
+</center>
+
+## Records Updating
+
+### `gbif_records`
+
+The `gbif_records` function retrieves species records of user entered taxanomic group(s) from the Global Biodiversity Information Facility database via the `taxize::occ_search` function. Only records from a designated year range are returned for a geographic area supplied to the function in the form of a class 'sp' object as defined by the `sp` package.
+
+Function Code:
+```{r gbif_records, eval = FALSE}
+gbif_records <- function (groups, rank, bounds, years,
+                          yr_from = as.numeric(substr(Sys.Date(), 1, 4)),
+                          limit = 50000,
+                          genus_level = FALSE) {
+  bound <- rgeos::writeWKT(bounds, byid = FALSE)
+  yr.range <- paste(yr_from - years, yr_from, sep = ",")
+
+  out <- data.frame(NULL)
+
+  pb <- winProgressBar(title = "Progress Bar", min = 0, max = length(groups), width = 300)
+  for (i in 1:length(groups)) {
+    key <- rgbif::name_suggest(q = groups[i], rank = rank)$key[1]
+    temp <- rgbif::occ_search(taxonKey = key, return = 'data', limit = limit,
+                              fields = c("order", "family", "genus", "species", "eventDate", "year",
+                                         "decimalLatitude", "decimalLongitude", "basisOfRecord",
+                                         "occurrenceID", "references"),
+                              geometry = bound,
+                              year = yr.range)
+
+    temp$Group <- groups[i]
+
+    out <- rbind(out, temp)
+    rm(key, temp)
+
+    setWinProgressBar(pb, i, title=paste( round(i/length(groups)*100, 0), "% Done", sep = ''))
+    if (i == length(groups)) {
+      close(pb)
+      cat('DONE! \n')
+    } else {NA}
+  }
+
+  out <- out[, c("Group", "order", "family", "genus", "species", "eventDate", "year",
+                 "decimalLatitude", "decimalLongitude", "basisOfRecord",
+                 "occurrenceID", "references")]
+
+  if (genus_level) {
+    out <- out
+  } else {
+    out <- out[!is.na(out$species),]
+  }
+
+  return(out)
+}
+
+```
+
+### `rec_update`
+
+The `rec_update` function filters species records that have GPS coordinates, such as those returned by the function `gbif_records`, and labels them with the closest geographic feature. All of the records for the individual geographic features that are already in a user entered species records database are filtered out. Additionally, the `rec_update` function adds a column to the records data frame that denotes if the species has at least a certain number (default is `rec_num = 5`) of records on a particular geographic feature for easy determination of record credibility.
+
+```{r rec_update, eval = FALSE}
+rec_update <- function(gbif_occ, geography, geo_name, data, sp_name, num_rec = 5) {
+  temp <- sf::st_as_sf(gbif_occ, coords = c("decimalLongitude", "decimalLatitude"), crs = st_crs(geography)$proj4string)
+  att.tab <- sf::st_drop_geometry(geography)
+  tmp1 <- sf::st_nearest_feature(temp, geography)
+  temp[, geo_name] <- NA
+
+
+  temp<-as.data.frame(temp)
+  for (i in 1:nrow(temp)) {
+    temp[i, geo_name] <- as.character(att.tab[tmp1[i], geo_name])
+  }
+
+  out<-data.frame(NULL)
+  geo_group <- levels(as.factor(temp[, geo_name]))
+
+  data[, sp_name] <- as.factor(data[, sp_name])
+
+  for (i in 1:length(geo_group)){
+    tmp2 <- setdiff(unique(temp[which(temp[, geo_name] == geo_group[i]), 'species']),
+                    levels(droplevels(data[which(data[, geo_name] == geo_group[i]), sp_name])))
+
+    for (j in 1:length(tmp2)){
+      out <- rbind(out, temp[which(temp[, geo_name] == geo_group[i] & temp$species == tmp2[j]), ])
+    }
+  }
+
+  coords <- as.character(out$geometry)
+  coords <- sub('c(', '', coords, fixed = TRUE)
+  coords <- sub(')', '', coords, fixed = TRUE)
+  coords <- strsplit(coords, ',')
+  coords <- matrix(unlist(coords), ncol=2, byrow=TRUE)
+  coords <- as.data.frame(coords)
+  names(coords) <- c("decimalLongitude", "decimalLatitude")
+
+  out <- cbind(out, coords)
+  out <- as.data.frame(out[, which(names(out)!='geometry')])
+
+
+  out$Multiple_Records<-NA
+  out$ref<-paste(out[, geo_name], out$species, sep="_")
+  refs<-unique(out$ref)
+
+  for (i in 1:length(refs)) {
+    if (nrow(out[which(out$ref == refs[i]),]) >= num_rec) {
+      out[which(out$ref == refs[i]),'Multiple_Records']<-'YES'
+    } else {
+      out[which(out$ref == refs[i]),'Multiple_Records']<-'NO'
+    }
+  }
+
+  return(out[, which(names(out) != 'ref')])
+}
+
+```
+
+## Taxonomy
+
+### `hierarchy`
+
+The `hierarchy` function searches a user define biodiversity database for the taxonomic hierarchy (i.e. Kingdom, Phylum, Class, Order, Family, Genus) of a species or set of species. If `error.ret = TRUE` (the default), the function also determines if an error has occurred in the matching of the species name to the data base by comparing the species name returned by the search to the one supplied by the user. The common errors (i.e. species could not be found, or the names returned by search and supplied do not match) will be diagnosed and the errors returned in a message. Any errors will also be denoted in a new column added to the returned data frame.
+
+```{r hierarchy, eval = FALSE}
+hierarchy <- function(data, species, db = 'gbif', error.ret = TRUE) {
+  sp <- levels(as.factor(data[, species]))
+  out <- data.frame(NULL)
+
+  for (i in 1:length(sp)) {
+    if (db == 'gbif') {
+      id <- c(taxize::get_gbifid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'ncbi') {
+      id <- c(taxize::get_uid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'itis') {
+      id <- c(taxize::get_tsn_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'eol') {
+      id <- c(taxize::get_eolid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'col') {
+      stop(paste(db,"is currently not supported by taxize"))
+    } else if (db == 'nbn') {
+      id <- c(taxize::get_id_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'tropicos') {
+      id <- c(taxize::get_tpsid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'worms') {
+      id <- c(taxize::get_wormsid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'natserv') {
+      id <- c(taxize::get_natservid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'bold') {
+      id <- c(taxize::get_boldid_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'wiki') {
+      id <- c(taxize::get_wiki_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else if (db == 'pow') {
+      id <- c(taxize::get_pow_(sp[i], messages = FALSE, rows = 1)[[1]][1,1])
+    } else {
+      stop(paste(db,"is not an acceptable database name"))
+    }
+
+    if (length(id) == 1) {
+      tmp <- taxize::classification(id, db = db)
+
+      if (nrow(tmp[[1]]) == 7) {
+        tmp2 <- data.frame(sp_in_Data = sp[i],
+                           Kingdom = tmp[[1]][which(tmp[[1]]$rank == 'kingdom'), 'name'],
+                           Phylum = tmp[[1]][which(tmp[[1]]$rank == 'phylum'), 'name'],
+                           Class = tmp[[1]][which(tmp[[1]]$rank == 'class'), 'name'],
+                           Order = tmp[[1]][which(tmp[[1]]$rank == 'order'), 'name'],
+                           Family = tmp[[1]][which(tmp[[1]]$rank == 'family'), 'name'],
+                           Genus = tmp[[1]][which(tmp[[1]]$rank == 'genus'), 'name'],
+                           Species = tmp[[1]][which(tmp[[1]]$rank == 'species'), 'name'])
+      } else if (nrow(tmp[[1]]) == 6) {
+        tmp2 <- data.frame(sp_in_Data = sp[i],
+                           Kingdom = tmp[[1]][which(tmp[[1]]$rank == 'kingdom'), 'name'],
+                           Phylum = tmp[[1]][which(tmp[[1]]$rank == 'phylum'), 'name'],
+                           Class = tmp[[1]][which(tmp[[1]]$rank == 'class'), 'name'],
+                           Order = tmp[[1]][which(tmp[[1]]$rank == 'order'), 'name'],
+                           Family = tmp[[1]][which(tmp[[1]]$rank == 'family'), 'name'],
+                           Genus = tmp[[1]][which(tmp[[1]]$rank == 'genus'), 'name'],
+                           Species = NA)
+      }
+    } else {
+      tmp2 <- data.frame(sp_in_Data = sp[i],
+                         Kingdom = NA,
+                         Phylum = NA,
+                         Class = NA,
+                         Order = NA,
+                         Family = NA,
+                         Genus = NA,
+                         Species = NA)
+    }
+
+    out <- rbind(out, tmp2)
+  }
+
+
+  if (error.ret) {
+    out$Error<-'NO'
+
+    for (i in as.numeric(rownames(out[!is.na(out$Species), ]))) {
+      if (out[i, 'sp_in_Data'] != out[i, 'Species']) {
+        out[i, 'Error'] <- 'ERROR'
+      } else {NA}
+    }
+
+    message('Could not find species: ')
+    mess<-levels(droplevels(out[is.na(out$Species), 'sp_in_Data']))
+    for (i in 1:length(mess)) {
+      message(mess[i])
+    }
+
+    message('')
+    message('--------------------------------------------')
+    message('')
+
+    message('Species names that do not match: ')
+    mess<-levels(droplevels(out[which(out$Error=='ERROR'), 'sp_in_Data']))
+    for (i in 1:length(mess)) {
+      message(mess[i])
+    }
+
+    out[is.na(out$Species), 'Error'] <- 'ERROR'
+
+  } else {NA}
+
+  return(out)
+}
+
+```
+
+
+
+### `div_db_ids`
+
+The `div_db_ids` searches for a taxa's database identification code for user selected biodiversity databases. By default (which cannot be changed) the function first looks up the id for the Catalogue of Life and then based on that id, looks up the other database(s) ids.
+
+NOTE: The package `taxize` is currently not working with Catalogue of Life due to restriction on its API. Therefore, this function does not work in its current form and should not be used. The function, is being worked on and will hopefully be running again soon.
+
+```{r div_db_ids, eval = FALSE}
+div_db_ids <- function(data, species, db = NULL) {
+
+  stop('Catelogue of Life currently not supported:\n      div_db_ids function deprecated')
+
+  sp <- levels(as.factor(data[, species]))
+  tmp <- taxize::get_ids(names = sp[i], db = 'col')
+  out <- data.frame(Species = names(c(tmp[[1]])), COL.id = c(tmp[[1]]))
+
+  for (i in 2:length(sp)) {
+    tmp <- taxize::get_ids(names = sp[i], db = 'col')
+    tmp <- data.frame(Species = names(c(tmp[[1]])), COL.id = c(tmp[[1]]))
+    out <- rbind(out, tmp)
+    Sys.sleep(15)
+  }
+
+  if (length(db) == 1) {
+    out$Species<-as.character(out$Species)
+    out$COL_id<-as.character(out$COL_id)
+
+    col <- paste(toupper(db), 'id', sep = "_")
+    out[, col] <- NA
+
+    for(i in 1:nrow(out)) {
+      tmp <- taxize::get_ids(out[i, 'COL.id'], db = db)
+
+      out[i, col]<-tmp[[1]][[1]]
+    }
+  } else if (length(db) == 2) {
+    out$Species<-as.character(out$Species)
+    out$COL_id<-as.character(out$COL_id)
+
+    col <- paste(toupper(db), 'id', sep = "_")
+    out[, col[1]] <- NA
+    out[, col[2]] <- NA
+
+    for(i in 1:nrow(out)) {
+      tmp <- taxize::get_ids(out[i, 'COL.id'], db = db)
+
+      out[i, col[1]]<-tmp[[1]][[1]]
+      out[i, col[2]]<-tmp[[2]][[1]]
+    }
+  } else if (length(db) == 3) {
+    out$Species<-as.character(out$Species)
+    out$COL_id<-as.character(out$COL_id)
+
+    col <- paste(toupper(db), 'id', sep = "_")
+    out[, col[1]] <- NA
+    out[, col[2]] <- NA
+    out[, col[3]] <- NA
+
+    for(i in 1:nrow(out)) {
+      tmp <- taxize::get_ids(out[i, 'COL.id'], db = db)
+
+      out[i, col[1]] <- tmp[[1]][[1]]
+      out[i, col[2]] <- tmp[[2]][[1]]
+      out[i, col[3]] <- tmp[[3]][[1]]
+    }
+  } else {NA}
+
+  return(out)
+}
+
+```
+
+
+## Data Calculations
+
+### `clade_age`
+
+The `clade_age` function is used to calculate the crown age of a clade(s) of species based on a user supplied phylogenetic tree. The crown age is calculated by determining the maximum of the distances from the root to each node, which is calculated using the `ape::node.depth.edgelength` function. The user supplied tree must be fully time resolved or an error will be returned. The ages returned will be in the units of the branch lengths in the tree.
+
+```{r clade_age, eval = FALSE}
+clade_age <- function(tree, taxonomy, species, clades, total = TRUE, sp_sep = ' ') {
+
+  row.names(taxonomy) <- sub(sp_sep, '_', taxonomy[, species])
+
+  out <- data.frame(NULL)
+
+  for (i in 1:length(clades)) {
+    groups <- as.character(sort(unique(taxonomy[, clades[i]])))
+
+    tmp1 <- data.frame(NULL)
+
+    for (j in 1:length(groups)) {
+      sub.tree <- ape::drop.tip(tree, setdiff(tree$tip.label,
+                                              row.names(taxonomy[which(taxonomy[, clades[i]] == groups[j]), ])))
+
+      if (!is.null(sub.tree)) {
+        tmp2 <- data.frame(Clade = groups[j],
+                           Rank = clades[i],
+                           Age = max(ape::node.depth.edgelength(sub.tree)))
+      } else {
+        tmp2 <- data.frame(Clade = groups[j],
+                           Rank = clades[i],
+                           Age = NA)
+      }
+
+      tmp1 <- rbind(tmp1, tmp2)
+    }
+
+    out <- rbind(out, tmp1)
+  }
+
+  if (total) {
+  tot.tree <- drop.tip(tree, setdiff(tree$tip.label, row.names(taxonomy)))
+
+  out <- rbind(out, data.frame(Clade = 'All',
+                               Rank = NA,
+                               Age = max(ape::node.depth.edgelength(tot.tree))))
+  } else {NA}
+
+  return(out)
+}
+
+```
+
+
+### `com_matrix`
+
+The `com_matrix` function is used to create a list of i x j data frames where i is the number of geographical features and j is the total number of species across those features plus a column for the geographical feature names. The matrix is filled in with the presence (1) and absence (0) of each species in the data for a particular species group. The list returned has k data frames created by the function `reshape::cast` where k is the number of species groups. The species groups are created by a full cross between taxonomic clades and species statuses. The user can also designate whether or not they what the combined statuses for each clade as well (`total = TRUE` which is default).
+
+```{r com_matrix, eval = FALSE}
+com_matrix <- function(data,
+                       species,
+                       geo_group,
+                       taxa_group,
+                       status,
+                       stat_levels = unique(data[, status]),
+                       total = TRUE) {
+
+  out<-list()
+
+  df <- data.frame(NULL)
+  for (m in 1:length(stat_levels)) {
+    tmp <- droplevels(data[which(data[, status] == stat_levels[m]), ])
+    df <- rbind(df, tmp)
+  }
+
+  data <- df
+  rm(df)
+
+  data[, species] <- gsub(' ', '_', data[, species], fixed = TRUE)
+  data[, species] <- as.factor(data[, species])
+  data[, geo_group] <- as.factor(data[, geo_group])
+  data[, status] <- as.factor(data[, status])
+
+  for (i in 1:length(taxa_group)) {
+    data[, taxa_group[i]] <- as.factor(data[, taxa_group[i]])
+  }
+
+  data$num <- 1
+
+  for (i in 1:length(taxa_group)) {
+    nams <- NULL
+    for (l in 1:length(stat_levels)) {
+      grp <- data.frame(Group = levels(droplevels(data[which(data[, status] == stat_levels[l]),
+                                                       taxa_group[i]])),
+                        Status = rep(stat_levels[l],
+                                     length(levels(droplevels(data[which(data[, status] == stat_levels[l]),
+                                                                   taxa_group[i]])))))
+      nams <- rbind(nams, grp)
+    }
+
+    grp <- levels(as.factor(nams$Group))
+    for (k in 1:length(grp)) {
+      for (l in 1:length(stat_levels)) {
+        if (!is.element(stat_levels[l], nams[which(nams$Group == grp[k]), 'Status'])) {
+          tmp <- data.frame(Group = grp[k], Status = stat_levels[l])
+          nams <- rbind(nams, tmp)
+        } else {NA}
+      }
+    }
+
+    tmp <- list()
+    for (j in 1:nrow(nams)) {
+      if (is.element(nams[j, 2], data[which(data[, taxa_group[i]] == nams[j, 1]), status])) {
+        tmp[[j]] <-  suppressMessages(reshape::cast(droplevels(data[which(data[, taxa_group[i]] == nams[j, 1] &
+                                                                            data[, status] == nams[j, 2]), ]),
+                                                    as.formula(paste(geo_group, "~", species)), min, fill = 0, value = 'num'))
+      } else {
+        rows <- levels(data[which(data[, taxa_group[i]] == nams[j, 1]), geo_group])
+        cols <- levels(droplevels(data[which(data[, taxa_group[i]] == nams[j, 1]), species]))
+        tmp[[j]] <- data.frame(matrix(0, nrow = length(rows), ncol = 1+length(cols)))
+        names(tmp[[j]]) <- c(geo_group, cols)
+        tmp[[j]][, geo_group] <- rows
+        rm(rows, cols)
+      }
+
+    }
+    names(tmp) <- paste(nams[, 1], nams[, 2], sep=".")
+    out <- c(out, tmp)
+    rm(tmp, nams)
+  }
+
+
+  if (total) {
+    for (i in 1:length(taxa_group)) {
+      nams <- data.frame(V1 = levels(droplevels(data[, taxa_group[i]])),
+                         V2 = rep('T', length(levels(droplevels(data[, taxa_group[i]])))))
+
+      tmp <- list()
+      for (j in 1:nrow(nams)) {
+        tmp[[j]] <- suppressMessages(reshape::cast(droplevels(data[which(data[, taxa_group[i]] == nams[j, 1]),]),
+                                                   as.formula(paste(geo_group,"~",species)), min, fill = 0, value = 'num'))
+      }
+      names(tmp) <- paste(nams[, 1], nams[, 2], sep=".")
+      out <- c(out, tmp)
+      rm(tmp, nams)
+    }
+
+    nams <- expand.grid("All", stat_levels)
+    nams[, 1] <- as.character(nams[, 1])
+    nams[, 2] <- as.character(nams[, 2])
+
+    tmp <- list()
+    for (j in 1:nrow(nams)) {
+      tmp[[j]] <- suppressMessages(reshape::cast(droplevels(data[which(data[, status] == nams[j, 2]),]),
+                                                 as.formula(paste(geo_group,"~",species)), min, fill = 0, value = 'num'))
+    }
+    names(tmp) <- paste(nams[, 1], nams[, 2], sep=".")
+    out <- c(out, tmp)
+    rm(tmp, nams)
+
+    tmp <- list()
+    tmp[[1]] <- suppressMessages(reshape::cast(data, as.formula(paste(geo_group,"~",species)), min, fill = 0, value = 'num'))
+    names(tmp)<-"All.T"
+
+    out <- c(out, tmp)
+    rm(tmp)
+  } else {NA}
+
+  out <- out[sort(names(out))]
+  return(out)
+}
+
+```
+
+
+### `isolation`
+
+The `isolation` function is used to calculate the isolation metrics based on a Principle Components Analysis (PCA) of isolation distances for geographic features of interest. Isolation distances are the summed distances between a geographic feature and all others (including the mainland), the distance to nearest neighbor, minimum distance to mainland, and the minimum distance to a source geographic feature. The user can also designate whether or not they want the minimum distance to another bank (including the mainland) to be included in the PCA. These isolation distances follow the procedure used in Helmus et al. (2014) and they are square root transformed before a scaled PCA is performed. For the sake of metric interpretation and to see how well the PCA fit the isolation distances, the PCA eigenvalues and loadings can be returned at the user's request (`stats = TRUE` which default).
+
+```{r isolation, eval = FALSE}
+isolation <- function (dist, source, main,
+                       geo.rm = NULL,
+                       min = TRUE,
+                       sq.rt = TRUE,
+                       scale = TRUE,
+                       stats = TRUE) {
+  tmp1 <- dist[setdiff(row.names(dist), geo.rm), setdiff(colnames(dist), geo.rm)]
+  tmp1 <- tmp1[setdiff(row.names(tmp1), main), ]
+
+  banks <- as.character(row.names(tmp1))
+
+  tmp2 <- data.frame(bank = banks,
+                     sum = rep(NA, length(banks)),
+                     min = rep(NA, length(banks)),
+                     main = rep(NA, length(banks)),
+                     source = rep(NA, length(banks)))
+  if (sq.rt) {
+    for (i in 1:length(banks)) {
+      tmp2[i, 'sum'] <- sqrt(sum(tmp1[banks[i], c(banks, main)]))
+      tmp2[i, 'min'] <- sqrt(min(tmp1[banks[i], c(banks[which(banks != banks[i])], main)]))
+      tmp2[i, 'main'] <- sqrt(min(tmp1[banks[i], main]))
+      tmp2[i, 'source'] <- sqrt(min(tmp1[banks[i], source]))
+    }
+  } else {
+    for (i in 1:length(banks)) {
+      tmp2[i, 'sum'] <- sum(tmp1[banks[i], c(banks, main)])
+      tmp2[i, 'min'] <- min(tmp1[banks[i], c(banks[which(banks != banks[i])], main)])
+      tmp2[i, 'main'] <- min(tmp1[banks[i], main])
+      tmp2[i, 'source'] <- min(tmp1[banks[i], source])
+    }
+  }
+
+  rownames(tmp2) <- tmp2$bank
+
+  if (min) {
+    mat <- tmp2[, c('sum', 'min', 'main', 'source')]
+    temp <- FactoMineR::PCA(mat, scale = scale, graph = FALSE)
+
+
+    iso <- data.frame(bank=row.names(as.data.frame(temp$ind$coord)),
+                      PC1=as.data.frame(temp$ind$coord)[,1],
+                      PC2=as.data.frame(temp$ind$coord)[,2],
+                      PC3=as.data.frame(temp$ind$coord)[,3],
+                      PC4=as.data.frame(temp$ind$coord)[,4])
+
+    var <- as.data.frame(temp[["eig"]])
+    var$PC <- paste('PC', seq(1, nrow(temp[["eig"]]), 1), sep = ".")
+    row.names(var) <- NULL
+    names(var) <- c('Eigenvalue', 'X', 'Cum_Var', 'PC')
+    var <- var[, c('PC', 'Eigenvalue', 'Cum_Var')]
+
+    loadings <- as.data.frame(temp[["var"]]$cor)
+    names(loadings) <- paste('PC', seq(1, nrow(temp[["var"]]$cor), 1), sep = ".")
+    loadings$Variable <- row.names(loadings)
+    row.names(loadings) <- NULL
+    loadings <- loadings[, c('Variable', paste('PC', seq(1, nrow(temp[["var"]]$cor), 1), sep = "."))]
+
+    if (stats) {
+      out <- list(iso, var, loadings)
+      names(out) <- c('Components', 'Variance', 'Loadings')
+    } else {
+      out <- iso
+    }
+  } else {
+    mat <- tmp2[, c('sum', 'main', 'source')]
+    temp <- FactoMineR::PCA(mat, scale = scale, graph = FALSE)
+
+
+    iso <- data.frame(bank=row.names(as.data.frame(temp$ind$coord)),
+                      PC1=as.data.frame(temp$ind$coord)[,1],
+                      PC2=as.data.frame(temp$ind$coord)[,2],
+                      PC3=as.data.frame(temp$ind$coord)[,3])
+
+    var <- as.data.frame(temp[["eig"]])
+    var$PC <- paste('PC', seq(1, nrow(temp[["eig"]]), 1), sep = ".")
+    row.names(var) <- NULL
+    names(var) <- c('Eigenvalue', 'X', 'Cum_Var', 'PC')
+    var <- var[, c('PC', 'Eigenvalue', 'Cum_Var')]
+
+    loadings <- as.data.frame(temp[["var"]]$cor)
+    names(loadings) <- paste('PC', seq(1, nrow(temp[["var"]]$cor), 1), sep = ".")
+    loadings$Variable <- row.names(loadings)
+    row.names(loadings) <- NULL
+    loadings <- loadings[, c('Variable', paste('PC', seq(1, nrow(temp[["var"]]$cor), 1), sep = "."))]
+
+    if (stats) {
+      out <- list(iso, var, loadings)
+      names(out) <- c('Components', 'Variance', 'Loadings')
+    } else {
+      out <- iso
+    }
+  }
+
+  return(out)
+}
+
+```
+
+
+### `PSV_geo`
+
+The `PSV_geo` function is used to calculate the phylogenetic species variability (PSV) for a set of geographic features of interest from a list of community data frames such as those returned by the `com_matrix` function. The PSV for each community is calculated for each geographic feature using the `phyr::psv` function. The `PSV_geo` requires a time resolved tree that often includes more species than in the community and has tip labels that match the column names of the community matrix or matrices. The `PSV_geo` function will not subset the tree before calculating the PSVs making them comparable. The function also returns the other metrics calculated by `phy::psv` such as the number of species used to calculate the PSV for a community on a particular geographic feature.
+
+```{r PSV_geo, eval = FALSE}
+PSV_geo <- function(tree, data, geo_group) {
+
+  out<-list(data.frame(geo_group=data[[1]][, geo_group]),
+            data.frame(geo_group=data[[1]][, geo_group]),
+            data.frame(geo_group=data[[1]][, geo_group]))
+  for (i in 1:length(out)) {
+    names(out[[i]])<-geo_group
+  }
+  names(out)<-c('PSV', 'Ntaxa', 'Vars')
+
+  for (i in 1:length(data)) {
+    if (length(intersect(names(data[[i]]), tree$tip.label)) > 0) {
+      com <- as.matrix(as.data.frame(data[[i]][, 2:ncol(data[[i]])]))
+      row.names(com) <- data[[i]][, geo_group]
+      tmp <- phyr::psv(com,tree)
+      names(tmp) <- paste(names(tmp), names(data)[i], sep=".")
+      tmp[, geo_group] <- row.names(tmp)
+      out[['PSV']] <- merge(out[['PSV']], tmp[, c(geo_group, names(tmp)[1])], by = geo_group, all=TRUE)
+      out[['Ntaxa']] <- merge(out[['Ntaxa']], tmp[, c(geo_group, names(tmp)[2])], by = geo_group, all=TRUE)
+      out[['Vars']] <- merge(out[['Vars']], tmp[, c(geo_group, names(tmp)[3])], by = geo_group, all=TRUE)
+
+      rm(tmp, com)
+    } else {
+      tmp <- data.frame(geo_group = data[[i]][, geo_group],
+                        PSVs = rep(NA, length(data[[i]][, geo_group])),
+                        SR = rep(NA, length(data[[i]][, geo_group])),
+                        vars = rep(NA, length(data[[i]][, geo_group])))
+
+      names(tmp)[2:4] <- paste(names(tmp)[2:4], names(data)[i], sep=".")
+
+      out[['PSV']] <- merge(out[['PSV']], tmp[, c(geo_group, names(tmp)[2])], by = geo_group, all=TRUE)
+      out[['Ntaxa']] <- merge(out[['Ntaxa']], tmp[, c(geo_group, names(tmp)[3])], by = geo_group, all=TRUE)
+      out[['Vars']] <- merge(out[['Vars']], tmp[, c(geo_group, names(tmp)[4])], by = geo_group, all=TRUE)
+    }
+  }
+  names(out[['PSV']]) <- sub('PSVs.', '', names(out[['PSV']]))
+  names(out[['Ntaxa']]) <- sub('SR.', '', names(out[['Ntaxa']]))
+  names(out[['Vars']]) <- sub('vars.', '', names(out[['PSV']]))
+
+  return(out)
+}
+
+```
+
+
+### `SR_geo`
+
+
+
+```{r SR_geo, eval = FALSE}
+
+```
+
+
+## Analysis
+
+### `AIC_avg`
+
+The `AIC_avg` function runs all combinations of explanatory variables for a given linear model and ranks them based on their AICc using the `MuMIn::dredge` function. Then the function averages the coefficients of the models that hold a certain amount of the AIC model weight (`cum.weight = 0.95` is the default) using the `MuMIn::model.avg` function and calculates the upper and lower 95% confidence levels for those averaged estimates using the `MuMIn::confint` function.
+
+Currently, if running more than one global model through the function during a session, then the `data`, `response`, and `x_vars` arguments need to be used.
+
+```{r AIC_avg, eval = FALSE}
+AIC_avg <- function(model, data = NULL, groups = NULL, response = NULL, x_vars = NULL,
+                    cum.weight = 0.95, table = FALSE) {
+  options(na.action = "na.fail")
+
+  if (!is.null(data)) {
+    if (!is.null(response) & !is.null(x_vars)) {
+      res <- response
+      vars <- x_vars
+
+      dat <- data[, c(response, x_vars)]
+      dat <- droplevels(dat[complete.cases(dat), ])
+
+      RHS <- vars[1]
+      for (j in 2:length(vars)) {
+        RHS <- paste(RHS, vars[j], sep = '+')
+      }
+
+      mod <- update(model, as.formula(paste(res, "~", RHS)), data = dat)
+    } else {
+      stop('response and/or x_vars not Provided')
+    }
+  } else {
+    mod <- model
+  }
+
+  if (table) {
+    table <- list()
+
+    dd <- dredge(mod)
+
+    top <- get.models(dd, subset = cumsum(weight) <= cum.weight)
+
+    if (length(top) > 0) {
+      avgm <- model.avg(top)
+      ci <- confint(avgm)
+
+      temp <- data.frame(cbind(avgm$coefficients[1, ]), ci)
+      names(temp) <- c('Estimate', 'LCL', 'UCL')
+      temp$Variable <- row.names(temp)
+      row.names(temp) <- NULL
+
+      if (!is.null(groups)) {
+        for (k in 1:ncol(groups)) {
+          temp[, names(groups)[k]] <- groups[1, k]
+        }
+        temp<-temp[, c(names(groups), "Variable", "Estimate", "LCL", "UCL")]
+      } else {NA}
+
+    } else {
+      temp <- data.frame(Estimate = NA, LCL = NA, UCL = NA, Variable = NA)
+
+      if (!is.null(groups)) {
+        for (k in 1:ncol(groups)) {
+          temp[, names(groups)[k]] <- groups[1, k]
+        }
+        temp<-temp[, c(names(groups), "Variable", "Estimate", "LCL", "UCL")]
+      } else {NA}
+    }
+
+    out <- list(temp, dd)
+    names(out) <- c('Coefficients', 'AIC Table')
+  } else {
+    dd <- dredge(mod)
+
+    top <- get.models(dd, subset = cumsum(weight) <= cum.weight)
+    if (length(top) > 0) {
+      avgm <- model.avg(top)
+      ci <- confint(avgm)
+
+      temp <- data.frame(cbind(avgm$coefficients[1, ]), ci)
+      names(temp) <- c('Estimate', 'LCL', 'UCL')
+      temp$Variable <- row.names(temp)
+      row.names(temp) <- NULL
+
+      if (!is.null(groups)) {
+        for (k in 1:ncol(groups)) {
+          temp[, names(groups)[k]] <- groups[1, k]
+        }
+        temp<-temp[, c(names(groups), "Variable", "Estimate", "LCL", "UCL")]
+      } else {NA}
+
+    } else {
+      temp <- data.frame(Estimate = NA, LCL = NA, UCL = NA, Variable = NA)
+
+      if (!is.null(groups)) {
+        for (k in 1:ncol(groups)) {
+          temp[, names(groups)[k]] <- groups[1, k]
+        }
+        temp<-temp[, c(names(groups), "Variable", "Estimate", "LCL", "UCL")]
+      } else {NA}
+    }
+
+    out <- temp
+  }
+
+  return(out)
+
+  options(na.action = "na.omit")
+}
+
+```
+
+
+### `psv_LM`
+
+
+
+```{r psv_LM, eval = FALSE}
+
+```
+
+
+### `r_squared`
+
+The `r_squared` function calculates the Multiple R^2^ and Adjusted R^2^ from beta estimates for a linear model. The function is particularly suited for the calculation of R^2^ values for averaged models like those returned by the `AIC_avg` function.
+
+```{r r_squared, eval = FALSE}
+r_squared <- function(estimates, data, response, x_vars, display = TRUE) {
+  dat <- data[complete.cases(data), ]
+  x_dat <- dat[, x_vars]
+  n <- nrow(dat)
+  p <- length(x_vars)
+
+  intercept <- setdiff(estimates[, 1], x_vars)
+  if (length(intercept) == 0) {
+    int <- 0
+  } else if (length(intercept) > 1) {
+    stop('length(setdiff(estimates[, 1], x_vars)) > 1: cannot determine Y Intercept')
+  } else {
+    int <- estimates[which(estimates[, 1] == intercept), 2]
+  }
+
+  tmp <- data.frame(Y = dat[, response],
+                    Y.hat = rep(NA, length(dat[, response])))
+
+  for (i in 1:nrow(tmp)) {
+    ests <- c(NULL)
+    X <- c(NULL)
+    for (j in 1:length(x_vars)) {
+      ests <- c(ests, estimates[which(estimates[, 1] == x_vars[j]), 2])
+      X <- c(X, x_dat[i, x_vars[j]])
+    }
+
+    tmp[i, 'Y.hat'] <- int + sum(ests*X)
+  }
+
+  rss <- sum((tmp$Y-tmp$Y.hat)^2)
+  tss <- sum((tmp$Y-mean(tmp$Y, na.rm = TRUE))^2)
+
+  R.sq <- 1 - (rss/tss)
+  adj.R.sq <- 1 - ((1 - R.sq)*((n-1)/(n-p-1)))
+
+  out <- data.frame(R.sq = R.sq,
+                    adj.R.sq = adj.R.sq)
+  if (display) {
+  cat(paste('Multiple R Squared =', round(R.sq, 4), '\n'))
+  cat(paste('Adjusted R Squared =', round(adj.R.sq, 4), '\n'))
+  cat('\n')
+  } else {NA}
+
+  return(out)
+}
+
+```
+
+
+### `sr_LM`
+
+
+
+```{r sr_LM, eval = FALSE}
+
+```
+
+
+## Graphing
+
+### `plot_est`
+
+
+
+```{r plot_est, eval = FALSE}
+
+```
+
+
+### `plot_est_age`
+
+
+
+```{r plot_est_age, eval = FALSE}
+
+```
+
+
+## Miscelaneous Utility
+
+### `EE_compile`
+
+
+
+```{r EE_compile, eval = FALSE}
+
+```
+
+
+### `not_all_NA`
+
+
+
+```{r not_all_NA, eval = FALSE}
+
+```
+
+
+### `row_max`
+
+
+
+```{r row_max, eval = FALSE}
+
+```
+
+
+### `stndrd`
+
+
+
+```{r stndrd, eval = FALSE}
+
+```
+
+---
+
+---
+
+Select the menu on the left to expand / collapse table of contents (TOC)
+entries. Press button below to collapse all TOC except the top level headings.
+
+<button id="btnCollapseHeading" onclick="collapseTOC()">Collapse sub-headings</button>
+
+If you only want to collapse level 3 headings press this button.
+
+<button id="btnCollapseLevel3" onclick="collapseLevel3()">Collapse Level 3 only</button>
+
+<script>
+function collapseTOC() {
+  var x = document.getElementsByClassName("tocify-subheader");
+  var i;
+  for (i = 0; i < x.length; i++) {
+      x[i].style.display = "none";
+  }
+}
+
+function collapseLevel3() {
+  var x = document.getElementsByClassName("tocify-subheader");
+  var i;
+  for (i = 0; i < x.length; i++) {
+      if (x[i].getAttribute("data-tag") == "3") {
+        x[i].style.display = "none";
+      }
+  }
+}
+
+</script>

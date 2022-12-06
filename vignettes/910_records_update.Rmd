@@ -1,0 +1,274 @@
+---
+title: "Caribbean Herp Records Update"
+author: "Jason M. Gleditsch^[Temple University, jmg5214@gmail.com]"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+  pdf_document:
+    toc: TRUE
+    toc_depth: 3
+---
+
+```{r functions, echo = FALSE, eval = FALSE}
+## Below are the caribmacro functions used in this vignette. Only run this chunk
+## if you have not installed the caribmacro package and are not running this in 
+## the caribmacro R project.
+
+gbif_records <- function (groups, rank, bounds, years,
+                          yr_from = as.numeric(substr(Sys.Date(), 1, 4)),
+                          limit = 50000,
+                          genus_level = FALSE) {
+  bound <- rgeos::writeWKT(bounds, byid = FALSE)
+  yr.range <- paste(yr_from - years, yr_from, sep = ",")
+
+  out <- data.frame(NULL)
+
+  pb <- winProgressBar(title = "Progress Bar", min = 0, max = length(groups), width = 300)
+  for (i in 1:length(groups)) {
+    key <- rgbif::name_suggest(q = groups[i], rank = rank)$key[1]
+    temp <- rgbif::occ_search(taxonKey = key, return = 'data', limit = limit,
+                              fields = c("order", "family", "genus", "species", "eventDate", "year",
+                                         "decimalLatitude", "decimalLongitude", "basisOfRecord",
+                                         "occurrenceID", "references"),
+                              geometry = bound,
+                              year = yr.range)
+    out <- rbind(out, temp)
+    rm(key, temp)
+
+    setWinProgressBar(pb, i, title=paste( round(i/length(groups)*100, 0), "% Done", sep = ''))
+    if (i == length(groups)) {
+      close(pb)
+      cat('DONE! \n')
+    } else {NA}
+  }
+
+  if (genus_level) {
+    out <- out
+  } else {
+    out <- out[!is.na(out$species),]
+  }
+
+  return(out)
+}
+
+
+rec_update <- function(gbif_occ, geography, geo_name, data, sp_name) {
+  temp <- sf::st_as_sf(gbif_occ, coords = c("decimalLongitude", "decimalLatitude"), crs = st_crs(banks)$proj4string)
+  attr <- sf::st_drop_geometry(geography)
+  tmp1 <- sf::st_nearest_feature(temp, geography)
+  temp[, geo_name] <- NA
+
+  for (i in 1:nrow(temp)) {
+    temp[i, geo_name] <- as.character(attr[tmp1[i], geo_name])
+  }
+
+```
+
+This vignette explains how records were obtained from GBIF and added to the data base. The code may have issues due to update with the 'rgbif' package. The outputs of the code are also not shown to make rendering the vignette easier.
+
+## Aim and Scope
+
+The aim of this vignette is to show how we update our herpetological records data with species records from the Global Biodiversity Information Facility (GBIF) via two functions in the 'caribmacro' package. 
+
+First we need to load in the caribmacro package.
+
+```{r project pkg, message = FALSE, eval = FALSE}
+# Project package
+library(caribmacro)
+
+```
+
+If you do not have this package installed, then run `devtools::load_all` in order to load all of the necessary functions if you are running this code in the caribmacro R project in the shared folder. If you are not, then see the Functions vignette for the functions needed.
+
+```{r project functions, eval = FALSE, message = FALSE}
+# Load all of the functions of the caribmacro package
+devtools::load_all("./", export_all = FALSE)
+
+```
+
+The other R packages needed for this are:
+
+```{r required packages, message = FALSE, eval = FALSE}
+library(here)
+
+# GBIF Database Package
+library(rgbif)
+
+# Spatial Packages
+library(rgeos)
+library(rgdal)
+library(sf)
+
+# Graphing Package
+library(ggplot2)
+
+```
+
+
+## GBIF Records Retrieval
+
+The first step to updating the herpetogical records in our database is to retrieve all of the records of herpetofauna in the Caribbean bioregion as described in Hedges et al. (2019) and Bermuda. This is done by loading in a shapefile that outlines the area(s) of interest (i.e. the region previously described) and using the `gbif_records()` function.
+
+The shapefile needs to read in using the `rgdal::readOGR()` function.
+
+```{r carib region, message = FALSE, eval = FALSE}
+# Load in shapefile for Geographic bounds
+outline<-readOGR(file.path(here(), 'data_raw', 'gis', 'Carib_Poly.shp'))
+
+```
+
+Now we can use `gbif_records()` to download the GBIF records for certain groups of taxa. Here we are downloading the records for the taxonomic classes 'Reptilia' and 'Amphibia' for the past two years. The groups have to be of the same taxonomic rank.
+
+```{r gbif records, message = FALSE, eval = FALSE}
+# Collect reptile and amphibian occurrences
+h.occ <- gbif_records(groups  = c('Amphibia','Reptilia'),
+                      rank = 'class',
+                      years = 2,
+                      bounds = outline)
+
+# Remove the shapefile since it is large and can slow down the computer
+rm(outline)
+```
+
+It is important to know the default setting for this function because you should check that these defaults returns all of the records you want. The first default you should check is the number of records that was returned by the function. The default setting for this is `limit = 50000`, and to check if this is enough, all you have to do is to see if the number of records for he the taxanomic groups idividually is less than 50,000 (i.e. make sure the number of rows of the data frame for a taxanomic group is less than 50,000). If it does, then you should increase the limit (i.e. `limit = 60000`) and check again. 
+
+```{r gbif record chk, eval = FALSE}
+(nrow(h.occ[which(h.occ$Group == 'Amphibia'), ]) == 50000)
+
+(nrow(h.occ[which(h.occ$Group == 'Reptilia'), ]) == 50000)
+
+```
+
+As you can see we did not max out the limit of records for either group. However, if either of the line of code above returned a `TRUE`, then we would have had to increase the `limit` argument. The function takes a while to run and will take even longer the more records it searches for. Therefore, it is recommended to only increase the limit in small increments. 
+
+The maximum number of records that can be retrieved for a single group is 200,000. If you max out that limit then you need to break up the time period into smaller intervals. The intervals are by year so if you still max out the 200,000 record limit, then use smaller groups of species (i.e. instead of using classes, like Reptilia, use orders, like Squamata). 
+
+In order to break up the time period from which you want to retrieve records, you need to understand how the function works. The `years` argument sets the earliest year you want records by subtracting the number of years you tell it to from another argument, `yr_from`. The default for `yr_from` is the current year of the computer (i.e. `substr(Sys.Date(), 1, 4)` which at the time this vignette was made `substr(Sys.Date(), 1, 4)` = `r substr(Sys.Date(), 1, 4)`). Therefore, if you, for example, want the records from 2016 through 2018, then you would set `yr_from = 2018` and `years = 2`, but if you want the records from 2018 through the current year, you only have to set `years = 2` and use the default for `yr_from`.
+
+Now let see what is returned by `gbif_records()`.
+
+```{r record view, eval = FALSE}
+head(h.occ)
+```
+
+As you can see only a subset of information is returned by `gbif_records()` (much more information is available about the records in GBIF). However, this is the minimum amount of information you need to check the credibility of these records. 
+
+
+## Records' Bank Identification
+
+You may have noticed that the `gbif_records()` does not tell you what geographic feature from which they came. For our purposes we want to know from which what island banks the records came. Unfortunately, the coordinates of the records are not that great making the identification of the islands from which they came nearly impossible. HOwever, this is currently being worked on to make this possible. 
+
+To determine from where the records came we need a shapefile of the geographic features of interest. We will do this using the `sf::st_read()` function because it is faster and `sf` objects are easier to work with.
+
+```{r banks shp, message = FALSE, eval = FALSE}
+# Load in shapefile of Geographic Features
+carib.bnk <- st_read(file.path(here(), 'data_raw', 'gis', 'Carib_Banks.shp'))
+
+```
+
+The function we will use to label the records with their geographic origin also filters out the records of species that we already have in our database. Therefore, we also need to load our data.
+
+```{r data load, eval = FALSE}
+# Load in our data
+herp <- read.csv(file.path(here(), 'data_raw', 'IBT_Herp_Records_final.csv'), header=TRUE)
+
+```
+
+Now we can use the `rec_update()` function to select the records that we do not have and label them with the island bank on which they were recorded.
+
+Note, that in `rec_update()` the argument `geo_name = 'bank'` refers the name of the attribute in the shapefile with the geographic feature names and the column in the data that has those same names. These must match for the function to work properly.
+
+```{r rec update, message = FALSE, eval = FALSE}
+new_recs <- rec_update(gbif_occ = h.occ,
+                       geography = carib.bnk,
+                       geo_name = 'bank',
+                       data = herp,
+                       sp_name = 'binomial')
+
+```
+
+Now when we look at the records we can see that a new column has been created to denote the island bank the to which the records belong.
+
+```{r new rec cols, message = FALSE, eval = FALSE}
+names(new_recs)
+```
+
+However, because the coordinates for the records are not that great, you should plot a few of the island banks to see how the records match their banks.
+
+```{r rec plots, message = FALSE, eval = FALSE}
+tmp1 <- carib.bnk[which(carib.bnk$bank == 'puerto rico' | carib.bnk$bank == 'mona' | 
+                          carib.bnk$bank == 'monito' | carib.bnk$bank == 'st croix'), ]
+tmp2 <- droplevels(new_recs[which(new_recs$bank == 'puerto rico' | new_recs$bank == 'mona' |
+                                    new_recs$bank == 'monito'| new_recs$bank == 'st croix'), ])
+
+tmp2 <- sf::st_as_sf(tmp2, coords = c("decimalLongitude", "decimalLatitude"), 
+                      crs = st_crs(tmp1)$proj4string)
+names(tmp2)[which(names(tmp2) == 'bank')] <- 'bank2'
+
+
+ggplot() +
+    geom_sf(data = carib.bnk, fill = 'azure2', color = 'black') +
+    geom_sf(data = tmp1, aes(fill = bank), color = 'black', alpha = 0.3) +
+    geom_sf(data = tmp2, aes(fill = bank2), shape = 21, color = 'black', alpha = 1) +
+    coord_sf(xlim = c(-68.25, -63.75), ylim = c(17, 19.5), expand = FALSE) +
+    xlab('Longitude') + 
+    ylab('Latitude') +
+    ggtitle('Puerto Rico and Nearby Banks')
+
+
+tmp1 <- carib.bnk[which(carib.bnk$bank == 'great bahama' | carib.bnk$bank == 'little bahama'), ]
+tmp2 <- droplevels(new_recs[which(new_recs$bank == 'great bahama' | 
+                                  new_recs$bank == 'little bahama'), ])
+
+tmp2 <- sf::st_as_sf(tmp2, coords = c("decimalLongitude", "decimalLatitude"), 
+                     crs = st_crs(tmp1)$proj4string)
+names(tmp2)[which(names(tmp2) == 'bank')] <- 'bank2'
+
+ggplot() +
+    geom_sf(data = carib.bnk, fill = 'azure2', color = 'black') +
+    geom_sf(data = tmp1, aes(fill = bank), color = 'black', alpha = 0.3) +
+    geom_sf(data = tmp2, aes(fill = bank2), shape = 21, color = 'black', alpha = 1) +
+    coord_sf(xlim = c(-80.5, -74), ylim = c(22, 28), expand = FALSE) +
+    xlab('Longitude') + 
+    ylab('Latitude') +
+    ggtitle('The Bahama Banks')
+
+```
+
+These plot show the locations of the records in relation to their banks. From these plots you can see how well the records match their banks. Most likely, you will have many records that do not match that well. However, even if all the records you download match perfectly, you still need to check all of the records.
+
+To check the records you first need to export the new records from R. Because we want to keep a records of the GBIF records downloaded and keep the package folder small, you need to export these records to the shared folder. The code below will export the records into the appropriate folder with the appropriate file name for the Caribbean Macrosystems Project.
+
+```{r data export, eval = FALSE}
+# Export records
+path <- file.path('G:', 'Shared drives', 'Caribbean Macrosystem', 'data', 
+                  'biodiversity', 'GBIF Records', 
+                  paste('Carib_Herp_GBIF_Records_', Sys.Date(), '.csv', sep = ''))
+herp <- write.csv(new_recs, path, row.names = FALSE)
+
+```
+
+
+## Checking the Records
+
+Now that the new records are exported you need to check the records for there credibility. This needs to be outside of `R`, but let's see what the new records data look like.
+
+```{r new rec view, eval = FALSE}
+head(new_recs)
+
+```
+
+As you can see, the `new_recs` data frame looks the same as the `h.occ` data frame. However there is another column in the `new_recs` data frame that denotes if there are more than one record for that species on that particular bank. This is the first step in determining the credibility of the records. If a species has at least five records for a patricular bank then you can mark it to be included in the database. The species with fewer than five records for a particular bank probably should not be included in the data base. However, just because there is only a few records does not mean that that record is bad. Additionally, you can reduce the number of records you will have to check the credibility for by comparing the species names to the list of synonyms in the database (this may be built into the `rec_update()` function in the future).
+
+The easiest way you can check the credibility of the record is to look at the 'basisOfRecord' column. If that column says that record is 'PRESERVED_SPECIMEN' then you can take that record as research grade and mark it to be included in the database. 
+
+If the record's 'basisOfRecord' column says 'HUMAN_OBSERVATION' then you need to check the source of the record. The 'occurrenceID' column has a link to the iNaturalist posting for that record. By following that link you can see the credibility of the identification. We only what IDs that are designated "Research Grade" by iNaturalist. Most of the records will be from iNaturalist. If there is no link in the 'occurrenceID' column, then check the 'references' column for the source of the record and check that. On iNaturalist, you can also see all of the other records of that species in a map. You can use also this to get an idea of the first recording of the species and the validity of the record. For instance if you see the species has been recorded on a particular bank for multiple years than the validity of that species being on that bank is high. All of the records you deem having high validity should be marked for inclusion in the database.
+
+Once you have marked all of the credible records, you need to do literature searches following the literature search protocols to see if there are any published records of that species on that bank. If so then record the earliest reference.
+
+After you do all of this, the records that were marked for inclusion should be added to the database following those protocols.
+
+
+## End

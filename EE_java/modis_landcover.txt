@@ -1,0 +1,81 @@
+// load data
+// "users/jmg5214/caribmacro_banks" can be found in the caribmacro GitHub
+// at https://github.com/gledits2/caribmacro/tree/master/data_raw/gis
+
+var polys = ee.FeatureCollection("users/jmg5214/caribmacro_banks"),
+    modis = ee.ImageCollection("MODIS/006/MCD12Q1");
+
+// Run for bands 0 (IGBP), 1 (UMD), and 4 (Annual Plant Functional Types classification)
+// 	Band 0 values = 1-14, 16
+// 	Band 1 values = 1-15
+// 	Band 4 values = 1-9, 11
+
+var image = modis.mosaic().clip(polys);
+
+// Set variables for the function
+var band = 1;
+var value = 11;
+var scale = 500;
+var maxPixels = 1e9;
+var geometry_export = 0;
+
+// Show the current band and value number
+print("band" + "=" + band);
+print("value" + "=" + value);
+
+var imageSelect = image.select( [band], ['selectedBand'] );
+var valuePixels = imageSelect.eq(value);
+
+// Mask all pixels that do not have a value equal to 'value'
+var newimg = imageSelect.updateMask(valuePixels);
+
+var polyStats = function( feat ){
+
+  // Count the number of pixels that have a value equal to 'value' in the bank
+  var valPix = newimg.reduceRegion(
+    {
+      reducer: ee.Reducer.count(),
+      geometry: feat.geometry(),
+      scale: scale,
+      maxPixels: maxPixels
+    }
+  );
+  feat = ee.Feature(feat).set( 'Value', valPix.get( 'selectedBand' ));
+
+  // Count the total number of pixels in the bank
+  var numPix = imageSelect.reduceRegion(
+    {
+      reducer: ee.Reducer.count(),
+      geometry: feat.geometry(),
+      scale: scale,
+      maxPixels: maxPixels
+    }
+  );
+  feat = feat.set( 'NumPix', numPix.get( 'selectedBand' ));
+
+  //add band name
+  var lc = image.bandNames().get(band).getInfo() + "-" + value;
+  feat= feat.set("Landcover", lc);
+
+  //add property to polygons out of bounds of image
+  //assume if one band is missing they all are -> can be split into multiple lines if required
+  feat =  ee.Feature( ee.Algorithms.If(ee.List(feat.propertyNames()).contains('Value'), feat, feat.setMulti({'Value':'',
+          'NumPix':''})) );
+
+  //remove geometry
+  feat = ee.Algorithms.If(ee.Number(geometry_export).eq(ee.Number(1)), feat ,feat = feat.setGeometry(null) );
+
+  return feat;
+};
+
+var polyValues = polys.map(polyStats); // run the function
+
+print(polyValues.first());
+
+
+// Export module output
+Export.table.toDrive({
+  collection: polyValues,
+  description: "LC_Type2",
+  fileFormat: 'CSV'
+});

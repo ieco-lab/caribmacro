@@ -1,0 +1,81 @@
+// load data
+// "users/jmg5214/caribmacro_banks" can be found in the caribmacro GitHub
+// at https://github.com/gledits2/caribmacro/tree/master/data_raw/gis
+
+var banks = ee.FeatureCollection("users/jmg5214/caribmacro_banks"),
+    pop2000 = ee.Image("CIESIN/GPWv4/population-count/2000"),
+    pop2005 = ee.Image("CIESIN/GPWv4/population-count/2005"),
+    pop2010 = ee.Image("CIESIN/GPWv4/population-count/2010"),
+    pop2015 = ee.Image("CIESIN/GPWv4/population-count/2015"),
+    pop2020 = ee.Image("CIESIN/GPWv4/population-count/2020");
+
+print(banks);
+
+// to get population for a specific bank:
+var tmp = banks.filter(ee.Filter.eq('bank', 'cuba'));
+print(pop2000.reduceRegion('sum', tmp.geometry()));
+print(pop2005.reduceRegion('sum', tmp.geometry()));
+print(pop2010.reduceRegion('sum', tmp.geometry()));
+print(pop2015.reduceRegion('sum', tmp.geometry()));
+print(pop2020.reduceRegion('sum', tmp.geometry()));
+
+// function to sum up pixels' population count for each bank
+var POPextract = function( image, polys){
+  var polyStats = function( feat ){
+    var polySum = image.reduceRegion('sum', feat.geometry());
+    feat = ee.Feature(feat).set( 'population', polySum.get( 'population-count' ));
+
+    //remove geometry
+    feat = feat.setGeometry(null);
+
+    return feat;
+  };
+
+  var polyValues = polys.map(polyStats);
+  return polyValues;
+};
+
+// run function
+var res2000 = POPextract(pop2000, banks);
+var res2005 = POPextract(pop2005, banks);
+var res2010 = POPextract(pop2010, banks);
+var res2015 = POPextract(pop2015, banks);
+var res2020 = POPextract(pop2020, banks);
+
+print(res2000);
+print(res2005);
+print(res2010);
+print(res2015);
+print(res2020);
+
+
+// Export module output
+Export.table.toDrive({
+  collection: res2000,
+  description: "Population_2000",
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: res2005,
+  description: "Population_2005",
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: res2010,
+  description: "Population_2010",
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: res2015,
+  description: "Population_2015",
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: res2020,
+  description: "Population_2020",
+  fileFormat: 'CSV'
+});

@@ -1,0 +1,14 @@
+.Rproj.user
+*.Rhistory
+.RData
+.Ruserdata
+vignettes/*.html
+vignettes/*.pdf
+.here
+data_raw/
+data_out/
+.httr-oauth
+tmp/
+sandbox/
+man/
+vignettes_dont_push/

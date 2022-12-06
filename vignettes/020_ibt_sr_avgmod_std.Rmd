@@ -1,0 +1,1821 @@
+---
+title: "Contemporized IBT Analysis"
+author: "Jason M. Gleditsch^[Temple University, jmg5214@gmail.com]"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+  pdf_document:
+    toc: TRUE
+    toc_depth: 3
+---
+
+# Aim and Scope
+
+Here we run the analyses to determine the relationships between various bank attributes and species richness (SR). First we will create linear models for each species group where bank is the experimental unit, and SR is the response variable. Then we will run models for every combination of explanatory variables and average the models that have 95% of the model weight based on the Akaike Information Criterion corrected for small sample size (AICc). We will then qualitatively compare the averaged model estimates and R squared values for the Exotic, Native, and Total communites for each taxonomic clade using 95% confidence intervals and dot and whisker plots (see 'Plotting' vignette for plots).
+
+We then will use the phylogeny to delineate the clades run the analyses again
+
+First we need to load in the caribmacro package.
+
+```{r project pkg, message = FALSE}
+# required packages
+library(caribmacro)
+
+```
+
+If you do not have this package installed, then run `devtools::load_all` in order to load all of the necessary functions if you are running this code in the caribmacro R project in the shared folder. If you are not runing this code in the caribmacro R project, then see the functions vignette for the Functions needed.
+
+```{r project functions, eval = FALSE, message = FALSE}
+# Load all of the functions of the caribmacro package
+devtools::load_all("./", export_all = FALSE)
+
+
+## Functions needed ##
+#   'sr_LM'  -> returns a list of many SR linear models and their data
+#   'AIC_avg'  -> determines the averaged estimates of a dredged global model
+#   'r_squared'  -> calculates the r-squared of an averaged model
+#   'stndrd'  -> mean centers and divides by sd columns of a data frame
+#   'factorize'  -> turns character columns of a data frame into factors
+```
+
+The other R packages needed for this are:
+
+```{r required packages, message=FALSE}
+library(here)
+
+# Analysis Packages
+library(pwr)
+library(MuMIn)
+library(qpcR)
+library(Hmisc)
+library(car)
+
+# Graphing Packages
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+#library(ggpattern)
+library(wesanderson)
+library(flextable)
+
+# Phylogenetic Packages
+library(ape)
+library(phyr)
+library(caper)
+
+```
+
+Now lets load in the important data from the 'data_out' folder and make last minute changes
+
+```{r data load, message=FALSE}
+# Load in data
+SR <- read.csv(file.path(here(), 'data_out', 'sr_drivers', 'SR_Drivers_Herp_SR.csv'), header = TRUE)
+bank_dat <- read.csv(file.path(here(), 'data_out', 'IBT_Bank_Data.csv'), header = TRUE)
+
+# Make bank in the format of row names
+bank_dat$bank<-gsub(".", " ", bank_dat$bank, fixed = TRUE)
+
+# Change NAs in the Lloyd vessel and port counts to 0
+bank_dat[is.na(bank_dat$ships), 'ships'] <- 0
+bank_dat$pop_dens <- bank_dat$pop_avg/bank_dat$Area
+
+# Invert the Ships Variable
+bank_dat$econ_iso <- 1/(bank_dat$ships + 1)
+```
+
+
+# Data Checking
+
+## Check for multicollinearity
+
+We will start by checking to see if the bank attribute data is correlated so that we can select appropriate explanatory variables for the models. However, we already know some of the variables we want in the models so let's just check for multicollinearity in those right now.
+
+```{r multicollinearity}
+# Select bank variables
+vars <- c('Area', 'min', 'source', 'Number', 'Spread', 'DEM.sd',
+          'green', 'anthro', 'pop_dens', 'ships', 'econ_iso')
+
+#Check for highly correlated bank variables
+tmp <- bank_dat[, vars]
+tmp$Area <- log(tmp$Area)
+tmp <- stndrd(vars, tmp)
+
+cors <- cor(tmp, use = "pairwise.complete.obs")
+
+cor.chk <- data.frame(NULL)
+
+for (i in 1:ncol(cors)) {
+  v2 <- names(cors[which(abs(cors[, i]) >= 0.5), i])
+  v2 <- v2[which(v2 != colnames(cors)[i])]
+  rs <- cors[v2, i]
+  names(rs) <- NULL
+  tmp <- data.frame(Var.1 = rep(colnames(cors)[i], length(v2)),
+                    Var.2 = v2,
+                    r = rs)
+
+  cor.chk <- rbind(cor.chk, tmp)
+  rm(v2, rs, tmp)
+}
+
+
+bad <- cor.chk[which(abs(cor.chk$r) >= 0.5 & cor.chk$Var.1 != 'ships' & cor.chk$Var.2 != 'ships'), ]
+tab <- flextable(bad[!duplicated(bad[, 'r']),])
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+As we can see Area is correlated with topographical complexity and the economic isolation (Pearson r = `r round(cor.chk[which(cor.chk$Var.1 == 'Area' & cor.chk$Var.1 == 'DEM.sd	'), 'r'], 3)` and `r round(cor.chk[which(cor.chk$Var.1 == 'Area' & cor.chk$Var.1 == 'econ_iso	'), 'r'], 3)`). In addition topographical complexity and the economic isolation are correlated with each other (Person r = `r round(cor.chk[which(cor.chk$Var.1 == 'DEM.sd' & cor.chk$Var.1 == 'econ_iso'), 'r'], 3)`).
+
+
+## Select Explanatory Variables
+
+Even though Area, topographical complexity ('DEM.sd'), and the number of ship visits ('ships') are all correlated with each other, they are thought to be important for our understanding of island biogeography so we will retain these variables. In addition, the variation inflation factor for these variables were not above 3 suggesting that they do not create issues of multicolinearity in the model. Still, any interpretations of these coefficients should be done with caution.
+
+```{r VIF dat, echo = FALSE}
+dat <- merge(SR[, c('bank', 'All.T')], bank_dat, by = 'bank', all = TRUE)
+dat <- dat[complete.cases(dat[, vars]), ]
+dat <- dat[!is.na(dat$All.T), ]
+
+dat$Area <- log(dat$Area)
+dat$All.T <- log(dat$All.T + 1)
+
+dat <- stndrd(vars = c('All.T', vars), data = dat)
+names(dat)[which(names(dat) == 'All.T')] <- 'SR'
+```
+
+```{r VIF, fig.align = 'center', fig.width = 2, fig.height = 4}
+mod <- lm(SR ~ Area + Spread + source + DEM.sd + green + anthro + pop_dens + econ_iso, data = dat)
+tmp <- round(data.frame(VIF = vif(mod)), 4)
+tmp$Variable <- row.names(tmp)
+
+tab <- flextable(tmp[, c('Variable', 'VIF')])
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+We will remove the distance to the nearest bank ('min') and number of islands ('Number'). This is based off of initial analyses showing the lack of importance of these variables in explaining the SR patterns. We will also remove the non-inverted number of ship visits ('ships').
+
+```{r variable select}
+vars <- vars[which(vars != 'Number' & vars != 'min' & vars != 'ships')]
+#vars <- vars[which(vars != 'min')]
+
+# Save the explanatory variables for the node analysis just in case
+nod.v <- vars 
+```
+
+
+# Species Richness Analysis
+
+## Clade Select
+
+It is important that we only retain the species groups that are found on enough island banks to have enough statistical power to determine the relationship.
+
+To determine the ideal number of banks needed to have a power of 0.8, we will use the `pwr.f2.test` function in the 'pwr' package. For this, we will need to estimate the R^2^ of the SARs. We will use the SAR for all of the reptile and amphibian species to estimate the desired R^2^. 
+
+```{r cld rem, message = FALSE, warning = FALSE}
+# Manipulate data
+dat <- merge(SR[, c('bank', 'All.T')], bank_dat, by = 'bank', all = TRUE)
+dat <- dat[complete.cases(dat[, vars]), ]
+dat <- dat[!is.na(dat$All.T), ]
+
+dat$Area <- log(dat$Area)
+dat$All.T <- log(dat$All.T + 1)
+
+dat <- stndrd(vars = c('All.T', vars), data = dat)
+
+# Determine the needed number of banks (n)
+# We will set the number of estimates to 9 
+m.all <- lm(All.T ~ Area + source + Spread + DEM.sd + green + anthro + pop_dens + econ_iso, 
+            data = dat)
+all.avg <- AIC_avg(m.all,
+                   data = dat,
+                   response = 'All.T',
+                   x_vars = vars,
+                   groups = data.frame(Genus = 'All',
+                                       Status = 'T'),
+                   cum.weight = 0.95,
+                   table = FALSE,
+                   std = 'partial.sd')
+
+tmp.v <- attr(m.all$terms,'term.labels')
+R2 <- r_squared(all.avg[, c('Variable', 'Estimate')],
+                data = dat,
+                response = 'All.T',
+                x_vars = tmp.v,
+                display = FALSE)[1, 1]
+
+n <- round(1 + pwr.f2.test(u = 8, f2 = R2/(1 - R2), power = 0.8)[['u']] + 
+               pwr.f2.test(u = 8, f2 = R2/(1 - R2), power = 0.8)[['v']], 0)
+
+# Select the clades that have at least 1 sp on >/= n banks
+tmp <- SR
+for (i in 2:ncol(tmp)) {
+  tmp[which(tmp[, i] < 1), i] <- 0
+  tmp[which(tmp[, i] >= 1), i] <- 1
+}
+
+good <- names(colSums(tmp[, names(tmp)[grep(".T", names(tmp), fixed = TRUE)]])[
+  which(colSums(tmp[, names(tmp)[grep(".T", names(tmp), fixed = TRUE)]]) >= n)])
+good <- sub('.T', '.', good)
+
+out <- data.frame(bank = SR$bank)
+
+for (i in 1:length(good)) {
+  if (sum(tmp[, names(tmp)[grep(good[i], names(tmp), fixed = TRUE)]][, 1]) >= n &
+      sum(tmp[, names(tmp)[grep(good[i], names(tmp), fixed = TRUE)]][, 2]) >= n &
+      sum(tmp[, names(tmp)[grep(good[i], names(tmp), fixed = TRUE)]][, 3]) >= n) {
+    out <- merge(out, SR[, c('bank', names(SR)[grep(good[i], names(SR), fixed = TRUE)])], 
+                 by = 'bank', all = TRUE)
+  } else {NA}
+}
+
+
+tmp <- unique(substr(setdiff(names(SR), names(out)), 1, nchar(setdiff(names(SR), names(out)))-2))
+
+# To print the names of the clades removed
+cat(paste0('Groups with not enough banks (n = ', length(tmp), ')', '\n', '\n',
+          paste(tmp, collapse = " | ")))
+ 
+cat(paste0('\n\n R^2 of complete model = ', R2, '\n\n'))
+ 
+cat(paste0('Minimum number of banks present = ', n, '\n\n'))
+
+SR <- out
+rm(tmp, out, m.all, tmp.v, all.avg)
+```
+
+## Remove Other Unwanted Clades
+
+Because we do not want the banks with no species of a certain clade in our analyses, let's turn the instances when the total species richness of a clade is 0 to NA as well as the corresponding native and exotic SR values. In other words, all instances when exotic, native, and total SR are equal to zero will be changed to NA, effectively removing them from the analyses.
+
+```{r remove d_0s}
+groups <- names(SR)[grep(".T", names(SR), fixed = TRUE)]
+groups <- sub('.T', '.', groups)
+
+for (i in 1:length(groups)) {
+  SR[which(SR[, paste(groups[i], 'T', sep = '')] == 0),
+     names(SR)[grep(groups[i], names(SR), fixed = TRUE)]] <- NA
+}
+
+```
+
+Additionally, we do not want to include clades that are the same as other clades (i.e. have the same species as another clade). To do this we need the taxonomy for each species so that we can check clade species lists to each other.
+
+```{r sp lists}
+taxa <- read.csv(file.path(here(), 'data_out', 'supp_info', 'IBT_Carib_Taxonomy.csv'), header = TRUE)
+taxa[which(taxa$Family=='Natricidae'), 'Family'] <- 'Colubridae'
+
+groups <- names(SR)[grep(".T", names(SR), fixed = TRUE)]
+groups <- sub('.T', '', groups)
+
+tmp.lists <- NULL
+for(i in 1:length(groups)) {
+  if (is.element(groups[i], taxa$Class)) {
+    tmp <- taxa[which(taxa$Class == groups[i]), c('Class', 'binomial')]
+  } else if (is.element(groups[i], taxa$Order)) {
+    tmp <- taxa[which(taxa$Order == groups[i]), c('Order', 'binomial')]
+  } else if (is.element(groups[i], taxa$Suborder)) {
+    tmp <- taxa[which(taxa$Suborder == groups[i]), c('Suborder', 'binomial')]
+  } else if (is.element(groups[i], taxa$Family)) {
+    tmp <- taxa[which(taxa$Family == groups[i]), c('Family', 'binomial')]
+  } else if (is.element(groups[i], taxa$Genus)) {
+    tmp <- taxa[which(taxa$Genus == groups[i]), c('Genus', 'binomial')]
+  } else {
+    tmp <- data.frame(Clade = groups[i], Species = NA)
+  }
+  
+  names(tmp) <- c('Clade', 'Species')
+  tmp.lists <- rbind(tmp.lists, tmp)
+}
+sp.lists <- tmp.lists[!is.na(tmp.lists$Species), ]
+
+# Clades not found in Taxonomy file
+tmp.lists[is.na(tmp.lists$Species), ]
+```
+
+```{r rem dups}
+groups <- groups[!is.element(groups, tmp.lists[is.na(tmp.lists$Species), 'Clade'])]
+
+chk <- NULL
+for(i in 1:length(groups)) {
+  tmp.g <- groups[which(groups != groups[i])]
+  
+  for (j in 1:length(tmp.g)) {
+    tmp.1 <- sp.lists[which(sp.lists$Clade == groups[i]), ]
+    tmp.2 <- sp.lists[which(sp.lists$Clade == tmp.g[j]), ]
+    if (length(tmp.1$Species) == length(tmp.2$Species)) {
+      if (!is.na(all(match(tmp.1$Species, tmp.2$Species)))) {
+        chk <- rbind(chk, data.frame(Clade.1 = groups[i], Clade.2 = tmp.g[j], chk = TRUE))
+      } else {
+        chk <- rbind(chk, data.frame(Clade.1 = groups[i], Clade.2 = tmp.g[j], chk = FALSE))
+      }
+    } else {
+      chk <- rbind(chk, data.frame(Clade.1 = groups[i], Clade.2 = tmp.g[j], chk = FALSE))
+    }
+  }
+}
+
+chk[chk$chk, ]
+
+```
+
+We are also going to remove the Anura clade. This is because the Anura clade has one more species than the Neobatrachia clade and one less species than the Amphibia clade.
+
+```{r rem anura}
+SR <- SR[, names(SR)[which(names(SR) != 'Anura.T' & names(SR) != 'Anura.E' & names(SR) != 'Anura.N')]]
+```
+
+```{r all r2 show}
+cat('Number of clades = ', (ncol(SR)-1)/3, '\n', '\n', 'R^2 = ', R2, '\n', '\n')
+
+```
+
+## Create SR Models
+
+Now that we removed the zeros, lets create the SR models. To do this we will use the `sr_LM()` function of the 'caribmacro' package. This function creates a list of ordinary linear models, with species richness as the response variable, that can be used in later analyses. Since we will use these models in AIC Model Averaging, it is important to only use data with complete cases so therefore we will set `complete.case = TRUE`. Additionally, this argument causes the function to return a list of length 2 with the first element (named 'Models') holding a list of j models where j is equal to the number of species groups. The second element (named 'Data') of that list is a list of j data frames that were used to create those models.
+
+
+```{r SR models}
+system.time(lm.sr <- sr_LM(SR = SR,
+                           data = bank_dat,
+                           x_vars = vars,
+                           geo_group = 'bank',
+                           area = 'Area',
+                           standardize = TRUE,
+                           log_area = TRUE,
+                           sq_area = FALSE,
+                           complete.case = TRUE))
+
+```
+
+## SR AIC Model Averaging
+
+Now that we have created a list of models, we can use them as global models in AIC Model Averaging. For each model, a set of models with every combination (including the intercept only) of explanatory variables is created. Those models are then ranked based on there AICc and their Akaike weights (i.e. the relative likelihood of the model) determined. We then select the models that have 95% of the cumalative model weight and using the weights calculate the weighted average of the model estimates. All of these steps have been incorporated in the `AIC_avg()` function of the 'caribmacro' package.
+
+Because some of our explanatory variables are slightly correlated we will weight the estimates of each model to be averaged based on the partial standard deviation (see [Cade 2015](https://doi.org/10.1890/14-1639.1)). This can be done in the `AIC_avg()` function with the 'std' argument.
+
+```{r SR AIC}
+mods <- lm.sr[['Models']]
+data <- lm.sr[['Data']]
+
+nams<-strsplit(names(mods), ".", fixed = TRUE)
+nams<-data.frame(matrix(unlist(nams), nrow = length(nams), byrow = TRUE))
+names(nams) <- c('Taxon', 'Group')
+nams$Taxon <- as.character(nams$Taxon)
+nams$Group <- as.character(nams$Group)
+
+Avg.SR <- data.frame(NULL)
+AIC_Tabs <- vector('list', length(mods))
+names(AIC_Tabs) <- names(mods)
+pb <- winProgressBar(title = "Progress Bar", min = 0, max = length(mods), width = 300)
+system.time(for (i in 1:length(mods)) {
+  dat <- data[[i]]
+  out <- suppressMessages(AIC_avg(mods[[i]],
+                                  data = dat,
+                                  response = names(mods)[i],
+                                  x_vars = vars,
+                                  groups = nams[i, ],
+                                  cum.weight = 0.95,
+                                  table = TRUE,
+                                  std = 'partial.sd'))
+  Avg.SR <- rbind(Avg.SR, out[['Coefficients']])
+  AIC_Tabs[[names(mods[i])]] <- out[['AIC Table']]
+
+  rm(dat, out)
+  setWinProgressBar(pb, i, title=paste( round(i/length(mods)*100, 0), "% Done", sep = ''))
+  if (i == length(mods)) {
+    close(pb)
+    cat('DONE! \n')
+  } else {NA}
+})
+```
+
+Now let's export the results to the 'data_out' folder.
+
+```{r SR AIC export}
+write.csv(Avg.SR, file.path(here(), 'data_out', 'results', 'sr_drivers', 'SR_Drivers_std_Estimates.csv'),
+          row.names=FALSE)
+```
+
+To further determine how the importance of island metrics change between the different assemblages, we will look at the representation of the metrics in the models that make up 95% of the cumulative model weight.
+
+```{r p.aic show, eval = FALSE}
+aic.p <- NULL
+for (i in 1:length(AIC_Tabs)) {
+  
+  # Determine the cumulative weight and select top models
+  AIC_Tabs[[i]]$cum.wt <- NA
+  
+  for (j in 1:nrow(AIC_Tabs[[i]])) {
+    AIC_Tabs[[i]][j, 'cum.wt'] <- sum(AIC_Tabs[[i]]$weight[1:j])
+  }
+  
+  tmp <- AIC_Tabs[[i]][which(AIC_Tabs[[i]]$cum.wt <= 0.95), ]
+  
+    # Determine the proportion of the top models that have each variable
+  out3 <- data.frame(Model = names(AIC_Tabs[i]),
+                     Area = nrow(tmp[!is.na(tmp$Area), ])/nrow(tmp),
+                     Spread = nrow(tmp[!is.na(tmp$Spread), ])/nrow(tmp),
+                     DEM.sd = nrow(tmp[!is.na(tmp$DEM.sd), ])/nrow(tmp),
+                     green = nrow(tmp[!is.na(tmp$green), ])/nrow(tmp),
+                     anthro = nrow(tmp[!is.na(tmp$anthro), ])/nrow(tmp),
+                     source = nrow(tmp[!is.na(tmp$source), ])/nrow(tmp),
+                     econ_iso = nrow(tmp[!is.na(tmp$econ_iso), ])/nrow(tmp),
+                     pop_dens = nrow(tmp[!is.na(tmp$pop_dens), ])/nrow(tmp))
+  aic.p <- rbind(aic.p, out3)
+
+  rm(tmp, out3)
+}
+
+aic.p$Clade <- data.frame(matrix(unlist(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 nrow = length(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 byrow = TRUE))$X1
+aic.p$Group <- data.frame(matrix(unlist(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 nrow = length(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 byrow = TRUE))$X2
+aic.p$Assemblage <- NA
+aic.p[which(aic.p$Group == 'N'), 'Assemblage'] <- 'Native'
+aic.p[which(aic.p$Group == 'E'), 'Assemblage'] <- 'Introduced'
+aic.p[which(aic.p$Group == 'T'), 'Assemblage'] <- 'Total'
+```
+
+```{r p.aic, echo = FALSE}
+aic.p <- NULL
+aic.wp <- NULL
+avg.aicwt <- NULL
+for (i in 1:length(AIC_Tabs)) {
+  AIC_Tabs[[i]]$cum.wt <- NA
+  
+  # Determine the average model weight for models with each variable
+  out1 <- data.frame(Model = names(AIC_Tabs[i]),
+                     Area = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$Area), 'weight']),
+                     Spread = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$Spread), 'weight']),
+                     DEM.sd = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$DEM.sd), 'weight']),
+                     green = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$green), 'weight']),
+                     anthro = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$anthro), 'weight']),
+                     source = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$source), 'weight']),
+                     econ_iso = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$econ_iso), 'weight']),
+                     pop_dens = mean(AIC_Tabs[[i]][!is.na(AIC_Tabs[[i]]$pop_dens), 'weight']))
+  avg.aicwt <- rbind(avg.aicwt, out1)
+  
+  # Determine the cumulative weight and select top models
+  for (j in 1:nrow(AIC_Tabs[[i]])) {
+    AIC_Tabs[[i]][j, 'cum.wt'] <- sum(AIC_Tabs[[i]]$weight[1:j])
+  }
+  
+  tmp <- AIC_Tabs[[i]][which(AIC_Tabs[[i]]$cum.wt <= 0.95), ]
+  
+  # Summed Akaike weight for each variable (weights recalculated for top models)
+  tmp$new.wt <- akaike.weights(tmp$AICc)$weights
+  out2 <- data.frame(Model = names(AIC_Tabs[i]),
+                     Area = sum(tmp$new.wt[!is.na(tmp$Area)]),
+                     Spread = sum(tmp$new.wt[!is.na(tmp$Spread)]),
+                     DEM.sd = sum(tmp$new.wt[!is.na(tmp$DEM.sd)]),
+                     green = sum(tmp$new.wt[!is.na(tmp$green)]),
+                     anthro = sum(tmp$new.wt[!is.na(tmp$anthro)]),
+                     source = sum(tmp$new.wt[!is.na(tmp$source)]),
+                     econ_iso = sum(tmp$new.wt[!is.na(tmp$econ_iso)]),
+                     pop_dens = sum(tmp$new.wt[!is.na(tmp$pop_dens)]))
+  aic.wp <- rbind(aic.wp, out2)
+  
+  # Determine the proportion of the top models that have each variable
+  out3 <- data.frame(Model = names(AIC_Tabs[i]),
+                     Area = nrow(tmp[!is.na(tmp$Area), ])/nrow(tmp),
+                     Spread = nrow(tmp[!is.na(tmp$Spread), ])/nrow(tmp),
+                     DEM.sd = nrow(tmp[!is.na(tmp$DEM.sd), ])/nrow(tmp),
+                     green = nrow(tmp[!is.na(tmp$green), ])/nrow(tmp),
+                     anthro = nrow(tmp[!is.na(tmp$anthro), ])/nrow(tmp),
+                     source = nrow(tmp[!is.na(tmp$source), ])/nrow(tmp),
+                     econ_iso = nrow(tmp[!is.na(tmp$econ_iso), ])/nrow(tmp),
+                     pop_dens = nrow(tmp[!is.na(tmp$pop_dens), ])/nrow(tmp))
+  aic.p <- rbind(aic.p, out3)
+
+  rm(tmp, out1, out2, out3)
+}
+
+aic.p$Clade <- data.frame(matrix(unlist(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 nrow = length(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 byrow = TRUE))$X1
+aic.p$Group <- data.frame(matrix(unlist(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 nrow = length(strsplit(aic.p$Model, '.', fixed = TRUE)), 
+                                 byrow = TRUE))$X2
+aic.p$Assemblage <- NA
+aic.p[which(aic.p$Group == 'N'), 'Assemblage'] <- 'Native'
+aic.p[which(aic.p$Group == 'E'), 'Assemblage'] <- 'Introduced'
+aic.p[which(aic.p$Group == 'T'), 'Assemblage'] <- 'Total'
+```
+
+```{r aic.p save}
+write.csv(aic.p, file.path(here(), 'data_out', 'results', 'sr_drivers', 'supp_info', 'SR_Drivers_aic_prop.csv'),
+          row.names=FALSE)
+```
+
+### Explore the SR results
+
+Let's explore some of the results of the SR analyses. 
+
+We will first look at the general trends and the relationships for the major clades (all herps, reptilia, and amphibia). To look athe the general trends we will calculate the mean coefficient across all clades (except the all herp clade) weighted by the effect size (Cohen's *f*^2^) of the clade's average model.
+
+```{r r2, echo = FALSE}
+data <- lm.sr[['Data']]
+vars2 <- attr(lm.sr[['Models']][[1]]$terms,'term.labels')
+
+nams<-strsplit(names(data), ".", fixed = TRUE)
+nams<-data.frame(matrix(unlist(nams), nrow = length(nams), byrow = TRUE))
+names(nams) <- c('Taxon', 'Group')
+nams$Taxon <- as.character(nams$Taxon)
+nams$Group <- as.character(nams$Group)
+
+R.sq_sr <- data.frame(NULL)
+for (i in 1:length(data)) {
+  temp <- Avg.SR[which(Avg.SR$Taxon == nams[i, 'Taxon'] &
+                       Avg.SR$Group == nams[i, 'Group']), c('Variable', 'Estimate')]
+
+  if (any(!is.na(temp$Estimate))) {
+
+    tmp <- r_squared(temp,
+                     data = data[[i]],
+                     response = names(data)[i],
+                     x_vars = vars2,
+                     display = FALSE)
+  } else {
+    tmp <- data.frame(R.sq = NA,
+                      adj.R.sq = NA)
+  }
+
+  tmp <- cbind(nams[i, ], tmp)
+  R.sq_sr <- rbind(R.sq_sr, tmp)
+}
+rm(nams, temp, tmp)
+```
+
+Cohen's *f*^2^ is based on the model fit (R^2^) which we calculated in the background (see the Model Fit section below for the code used to determine the R^2^ for the models). We also calculate the weighted standard errors and coefficients of variation (CV) for each relationship to investigate the variablility of the relationships across clades.
+
+```{r eft size}
+grp <- levels(as.factor(Avg.SR$Group))
+
+R.sq_sr$f2 <- R.sq_sr$R.sq/(1 - R.sq_sr$R.sq)
+temp <- merge(Avg.SR, R.sq_sr[, c("Taxon", "Group", "R.sq", "f2")], by = c("Taxon", "Group"), all = TRUE)
+
+w.avg.est2 <- NULL
+for (i in 1:length(vars)) {
+  tmp1 <- droplevels(temp[which(temp$Variable == vars[i] & temp$Taxon != 'All'), ])
+  
+  for (j in 1:length(grp)) {
+    tmp2 <- data.frame(Variable = vars[i], Group = grp[j],
+                       Sample.Size = nrow(tmp1[which(tmp1$Group == grp[j]), ]),
+                       Estimate = wtd.mean(tmp1[which(tmp1$Group == grp[j]), 'Estimate'], 
+                                           tmp1[which(tmp1$Group == grp[j]), 'f2']),
+                       Variance = wtd.var(tmp1[which(tmp1$Group == grp[j]), 'Estimate'],
+                                          tmp1[which(tmp1$Group == grp[j]), 'f2'], method = 'unbiased'))
+    w.avg.est2 <- rbind(w.avg.est2, tmp2)
+    rm(tmp2)
+  }
+  
+  rm(tmp1)
+}
+w.avg.est2$SD <- sqrt(w.avg.est2$Variance)
+w.avg.est2$SE <- w.avg.est2$SD/sqrt(w.avg.est2$Sample.Size)
+w.avg.est2$CV <- w.avg.est2$SD/abs(w.avg.est2$Estimate)
+```
+
+```{r var finessing, echo = FALSE}
+w.avg.est2$Assemblage <- NA
+w.avg.est2[which(w.avg.est2$Group == 'T'), 'Assemblage'] <- 'Total'
+w.avg.est2[which(w.avg.est2$Group == 'E'), 'Assemblage'] <- 'Introduced'
+w.avg.est2[which(w.avg.est2$Group == 'N'), 'Assemblage'] <- 'Native'
+
+order.hyp <- c(1, 3, 9, 4, 6, 2, 8, 5, 7)
+new.order.h <- order.hyp - 1
+new.order.h <- new.order.h[which(new.order.h >= 1)]
+
+w.avg.est2$Variable.H <- factor(w.avg.est2$Variable, levels(as.factor(w.avg.est2$Variable))[new.order.h])
+
+```
+
+```{r w.avg save}
+write.csv(w.avg.est2, file.path(here(), 'data_out', 'results', 'sr_drivers', 'SR_Drivers_weighted_avg_estimates.csv'),
+          row.names=FALSE)
+```
+
+```{r fig.2, echo = FALSE}
+cols <- wes_palettes[['Cavalcanti1']][c(5, 1, 3)]
+cols <- c('Introduced' = cols[1], 'Native' = cols[2], 'Total' = cols[3])
+labs <- c("Intercept",  
+          paste0("Economic", "\n", "Area    "),
+          paste0("Geographic", "\n", "Area      "), 
+          paste0("Topographic", "\n", "Complexity "), 
+          paste0("Economic", "\n", "Isolation "), 
+          paste0("Natural", "\n", "Area  "), 
+          paste0("Population", "\n", "Density  "), 
+          paste0("Geographic", "\n","Isolation  "), 
+          paste0("Island ", "\n","Spread"))
+
+labs.hyp <- labs[order.hyp[2:length(order.hyp)]]
+
+
+fig.2.wtd2 <- ggplot(w.avg.est2, aes(x = Variable.H, y = Estimate, fill = Group, color = Group)) +
+                #geom_hline(yintercept = 0, linetype = 'dotted', color = 'gray10') +
+                geom_bar(stat = 'identity',  position = position_dodge()) +
+                geom_errorbar(aes(ymin = Estimate - SE, ymax = Estimate + SE), 
+                              width = 0.25, position = position_dodge(.9), color = 'black') +
+                scale_fill_manual(values = cols) +
+                scale_color_manual(values = cols) +
+                ylab('Mean Estimate') + xlab(paste0('\n', 'Explanatory Variable')) +
+                scale_x_discrete(breaks = levels(w.avg.est2$Variable.H), labels = labs.hyp) +
+                guides(fill = guide_legend(title = "Assemblage", title.position = "top", title.hjust = 0.5),
+                       color = "none") +
+                theme_minimal() +
+                theme(legend.position = c(0.7, 0.85),
+                      legend.direction = 'horizontal',
+                      legend.text = element_text(size = 12),
+                      legend.title = element_text(size = 14),
+                      #legend.background = element_rect(fill = "white", size = 0.5, linetype = "solid"),
+                      axis.line.x = element_blank(),
+                      axis.line.y = element_line(color = 'black'),
+                      axis.text.y = element_text(size = 12, color = 'black'),
+                      axis.title = element_text(size = 14),
+                      axis.ticks.y = element_line(color = 'black'),
+                      panel.grid.major.x = element_blank(),
+                      axis.text.x = element_text(size = 12, angle = 90, hjust = 1, vjust = 0.5, 
+                                                 color = 'black'))
+
+
+
+```
+
+```{r fig.s1 data, echo = FALSE}
+Avg.SR$Variable.H <- factor(Avg.SR$Variable, levels(as.factor(Avg.SR$Variable))[order.hyp])
+
+Avg.SR$Fills <- 'NS'
+Avg.SR[which(Avg.SR$LCL < 0 & Avg.SR$UCL < 0 & Avg.SR$Group == 'N'), 'Fills'] <- 'Native'
+Avg.SR[which(Avg.SR$LCL > 0 & Avg.SR$UCL > 0 & Avg.SR$Group == 'N'), 'Fills'] <- 'Native'
+Avg.SR[which(Avg.SR$LCL < 0 & Avg.SR$UCL < 0 & Avg.SR$Group == 'E'), 'Fills'] <- 'Introduced'
+Avg.SR[which(Avg.SR$LCL > 0 & Avg.SR$UCL > 0 & Avg.SR$Group == 'E'), 'Fills'] <- 'Introduced'
+Avg.SR[which(Avg.SR$LCL < 0 & Avg.SR$UCL < 0 & Avg.SR$Group == 'T'), 'Fills'] <- 'Total'
+Avg.SR[which(Avg.SR$LCL > 0 & Avg.SR$UCL > 0 & Avg.SR$Group == 'T'), 'Fills'] <- 'Total'
+Avg.SR$Fills <- factor(Avg.SR$Fills, levels(as.factor(Avg.SR$Fills))[c(3, 1, 2, 4)])
+
+Avg.SR$Assemblage <- NA
+Avg.SR[which(Avg.SR$Group == 'N'), 'Assemblage'] <- 'Native'
+Avg.SR[which(Avg.SR$Group == 'E'), 'Assemblage'] <- 'Introduced'
+Avg.SR[which(Avg.SR$Group == 'T'), 'Assemblage'] <- 'Total'
+
+dat.all <- droplevels(Avg.SR[which(Avg.SR$Taxon == 'All' & Avg.SR$Variable != '(Intercept)'), ])
+dat.rep <- droplevels(Avg.SR[which(Avg.SR$Taxon == 'Reptilia' & Avg.SR$Variable != '(Intercept)'), ])
+dat.amp <- droplevels(Avg.SR[which(Avg.SR$Taxon == 'Amphibia' & Avg.SR$Variable != '(Intercept)'), ])
+
+dat.fig.s1 <- list(dat.all, dat.rep, dat.amp)
+rm(dat.all, dat.rep, dat.amp)
+```
+
+```{r fig.s1, echo = FALSE}
+UINT.cols <- c('NS' = 'white', cols)
+
+fig.s1 <- vector('list', length(dat.fig.s1))
+names(fig.s1) <- c('all', 'rept', 'amph')
+titles.Fs1 <- c('All Herpetofauna', 'Reptilia', 'Amphibia')
+panels.Fs1 <- LETTERS[1:length(titles.Fs1)]
+
+for (i in 1:length(fig.s1)) {
+  p <- ggplot(dat.fig.s1[[i]], aes(x = Variable.H, y = Estimate, color = Assemblage, fill = Fills)) +
+          geom_hline(yintercept = 0, linetype = 'dotted', color = 'gray30') +
+          geom_errorbar(aes(ymin = LCL, ymax = UCL), position = position_dodge(width = 0.7),
+                        width = 0, size = 1) +
+          geom_point(shape = 21, size = 2.5, position = position_dodge(width = 0.7)) +
+          scale_color_manual(values = cols) +
+          scale_fill_manual(values = UINT.cols[intersect(names(UINT.cols), unique(dat.fig.s1[[i]]$Fills))],
+                            limits = levels(dat.fig.s1[[i]]$Fills)) +
+          scale_x_discrete(breaks = levels(dat.fig.s1[[i]]$Variable.H), labels = labs.hyp) +
+          ggtitle(titles.Fs1[i]) + labs(tag = panels.Fs1[i]) + ylab('Averaged Estimate') +
+          theme_classic()
+  
+  if (i != length(fig.s1)) {
+    p <- p + theme(legend.position = "none",
+                   axis.title = element_text(size = 14, color = 'black'),
+                   axis.text.x = element_blank(),
+                   axis.title.x = element_text(color = 'white'),
+                   axis.text.y = element_text(size = 12, color = 'black'),
+                   plot.title = element_text(hjust = 0.5, size = 16),
+                   plot.tag.position = c(0.08, 0.975))
+  } else {
+    p <- p + xlab(paste0('\n', 'Explanatory Variable')) +
+             theme(legend.position = "none",
+                   axis.title = element_text(size = 14, color = 'black'),
+                   axis.text.x = element_text(angle = 90, size = 12, hjust = 1, vjust = 0.5, color = 'black'),
+                   axis.text.y = element_text(size = 12, color = 'black'),
+                   plot.title = element_text(hjust = 0.5, size = 16),
+                   plot.tag.position = c(0.08, 0.975))
+  }
+  
+  fig.s1[[i]] <- p
+}
+
+```
+
+```{r fig2 show, echo = FALSE, fig.height = 7, fig.width = 8}
+#fig.2A <- fig.2.wtd2 + labs(tag = '(A)') + 
+#                       theme(axis.text.x = element_blank(),
+#                             axis.title.x = element_text(color = 'white'),
+#                             plot.tag.position = c(0.08, 0.975))
+
+fig.2B <- fig.s1[[1]] + xlab('Explanatory Variable') + ylab('Estimate') +
+                        theme(legend.position = "none",
+                              axis.title = element_text(size = 9, color = 'black'),
+                              axis.text.x = element_blank(),
+                              axis.title.x = element_text(color = 'black'),
+                              axis.text.y = element_text(size = 9, color = 'black'),
+                              plot.title = element_blank(),
+                              plot.tag = element_blank())
+
+#grid.arrange(grobs = list(fig.2A, fig.2B), ncol = 1, nrow = , 
+#             widths = 5, heights = c(4, 3.5))
+
+fig.2 <- fig.2.wtd2 + annotation_custom(ggplotGrob(fig.2B), xmin = 0.75, xmax = 4.5, ymin = -0.35, ymax = -0.05)
+#fig.2
+```
+
+```{r fig2 alt1, fig.height = 6, fig.width = 8, message = FALSE, echo = FALSE}
+
+avgest.bar <- ggplot(w.avg.est2, aes(x = Variable.H, y = Estimate, fill = Assemblage, color = Assemblage)) +
+                geom_point(data = dat.fig.s1[[1]], 
+                        aes(x = as.numeric(Variable.H) + 0.05, y = Estimate, group = Assemblage), 
+                        shape = 8, color = 'grey20', fill = alpha('grey20', 0.5), size = 1.5, stroke = 1,
+                        position = position_dodge(width = 0.9)) +
+                geom_errorbar(data = dat.fig.s1[[1]], 
+                           aes(x = as.numeric(Variable.H) + 0.05, ymin = LCL, ymax = UCL, 
+                               group = Group, fill = NULL), 
+                           position = position_dodge(width = 0.9),
+                           width = 0, size = 0.5, color = 'grey20', linetype = 'dashed') +
+                geom_bar(stat = 'identity',  position = position_dodge()) +
+                geom_errorbar(aes(ymin = Estimate - SE, ymax = Estimate + SE), 
+                              width = 0.25, position = position_dodge(.9), color = 'black') +
+                scale_fill_manual(values = alpha(cols, 0.5)) +
+                scale_color_manual(values = cols) +
+                #ylab(expression('Mean Coefficient'~' ('%+-%'SE)')) +
+                ylab('Mean Coefficient') +
+                xlab(paste0('\n', 'Explanatory Variable')) +
+                scale_x_discrete(expand = expansion(mult = c(0.15, 0)), 
+                                 breaks = levels(w.avg.est2$Variable.H), labels = labs.hyp) +
+                guides(fill = guide_legend(title = "Assemblage", title.position = "top", title.hjust = 0.5)) +
+                theme_minimal() +
+                theme(legend.position = c(0.7, 0.9),
+                      legend.direction = 'horizontal',
+                      legend.text = element_text(size = 12),
+                      legend.title = element_text(size = 14),
+                      #legend.background = element_rect(fill = "white", size = 0.5, linetype = "solid"),
+                      axis.line.x = element_blank(),
+                      axis.line.y = element_line(color = 'black'),
+                      axis.text.y = element_text(size = 12, color = 'black'),
+                      axis.title = element_text(size = 14),
+                      axis.ticks.y = element_line(color = 'black'),
+                      panel.grid.major.x = element_blank(),
+                      axis.text.x = element_text(size = 12, angle = 90, hjust = 1, vjust = 0.5, 
+                                                 color = 'black'))
+avgest.bar
+```
+
+```{r fig2 save, echo = FALSE}
+ggsave(file.path(here(), 'data_out', 'results', 'sr_drivers', 'figs', 'Fig_4_psd-std.tif'), avgest.bar, 
+       device = 'tiff', height = 6, width = 8, units = 'in', dpi = 300)
+
+```
+
+```{r fig2 alt2, fig.height = 7, fig.width = 6, echo = FALSE, eval = FALSE}
+fig.2B2 <- fig.s1[[1]] + xlab('\nExplanatory Variable') + ylab('Estimate') + labs(tag = '(B)') +
+                         theme(legend.position = "none",
+                               axis.title.y = element_text(size = 14, color = 'black'),
+                               axis.title.x = element_text(size = 14, color = 'black'),
+                               axis.text.y = element_text(size = 12, color = 'black'),
+                               axis.text.x = element_text(size = 12, color = 'black', angle = 90),
+                               plot.title = element_blank(),
+                               plot.tag.position = c(0.01, 1))
+
+fig.2.wtd3 <- fig.2.wtd2 + xlab('Explanatory Variable') + ylab('Estimate') + labs(tag = '(A)') +
+                           theme(axis.title.y = element_text(size = 14, color = 'black'),
+                                 axis.text.x = element_blank(),
+                                 axis.text.y = element_text(size = 12, color = 'black'),
+                                 axis.title.x = element_text(size = 9, color = 'white'),
+                                 plot.title = element_blank(),
+                                 plot.tag.position = c(0.01, 1))
+
+grid.arrange(grobs = list(fig.2.wtd3, fig.2B2), ncol = 1, nrow = 2, widths = 6, heights = c(4, 3))
+```
+
+We see that across all of the herpetofaunal clades, area and isolation had the largest effects on species richness. Larger banks, in terms of land area, overall had more native and introduced species richness, and therefore, area had a greater effect on total species richness patterns. Conversely, banks that were further from an evolutionary source had less native and more introduced species, resulting in a decreased effect of isolation on total species richness patterns. 
+
+Additionally, the more topographical complexity on a bank increased native species richness but had little effect on introduced species richness. This caused the effect on total species richness to be slightly reduced. On the other hand, more anthropogenic habitat increased introduced species richness causing anthropogenic habitat to a larger effect on total species richness. Similarly, more ship visits to a bank increased introduced species richness causing ship visits to have more of an effect on total species richness.
+
+The amount of green habitat on a bank had overall small positive effects on species richness, but increased introduced species richness more than native and total species richness. Island spread had small positive effects that were similar between the three species assemblages (i.e. native, introduced, and total) and population density did not have consistent effects overall.
+
+```{r aic.p plot, echo = FALSE}
+tits.aicFig <- gsub(' ', '', labs.hyp, fixed = TRUE)
+tits.aicFig <- gsub('\n', ' ', tits.aicFig, fixed = TRUE)
+names(tits.aicFig) <- c("Area",  "Spread", "DEM.sd", "green", "anthro", "source", "econ_iso", "pop_dens")
+vars2 <- c("Area",  "Spread", "DEM.sd", "green", "anthro", "source", "econ_iso", "pop_dens")
+aic.fig <- vector('list', length(vars2))
+names(aic.fig) <- c('area', 'spread', 'topo', 'green', 'anthro', 'iso', 'ships', 'pop')
+for (i in 1:(length(vars2))) {
+  temp <- aic.p[, c('Clade', 'Assemblage', vars2[i])]
+  names(temp)[3] <- 'p.Models'
+  p <- ggplot(temp, aes(x = Assemblage, y = p.Models, color = Assemblage, fill = Assemblage)) +
+          geom_line(aes(group = Clade), color = 'gray') +
+          geom_violin(width = 0.8) +
+          geom_point(position = position_dodge(width = 0.5)) +
+          scale_fill_manual(values = alpha(cols, 0.3)) +
+          scale_color_manual(values = cols) +
+          scale_y_continuous(limits = c(0.27, 1.05), breaks = seq(0, 1, 0.1), 
+                             labels = c('0.0', '', '0.2', '', '0.4', '', '0.6', '', '0.8', '', '1.0')) +
+          ggtitle(tits.aicFig[vars2[i]]) + xlab('Species Assemblage') + ylab('Prop. of Top Models') + 
+          labs(tag = paste0('(', LETTERS[i], ')')) + 
+          guides(fill = guide_legend(title = "Species\nAssemblage", title.position = "top", title.hjust = 0.5), 
+                 color = guide_legend(title = "Species\nAssemblage", title.position = "top", title.hjust = 0.5)) +
+          theme_classic() +
+          theme(legend.position = "none", 
+                axis.title = element_text(size = 12, color = 'black'),
+                axis.text.x = element_text(size = 12, color = 'white'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                plot.title = element_text(hjust = 0.5, size = 14),
+                plot.tag.position = c(0.155, 0.975))
+
+  if (!is.element(i, c(1, 4, 7))) {
+    p <- p + theme(axis.title.y = element_text(angle = 90, size = 12, color = 'white'))
+  } else {
+    p <- p + theme(plot.tag.position = c(0.155, 0.975))
+  }
+  
+  if (is.element(i, c(1:length(vars2)-3))) {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'),
+                   axis.text.x = element_blank())
+  } else {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'black'),
+                   axis.text.x = element_blank())
+  }
+  
+  aic.fig[[i]] <- p
+}
+
+
+leg <- as_ggplot(get_legend(aic.fig[[1]] + #guides(fill = FALSE) + 
+                              theme(legend.position = 'right', legend.box = 'horizontal')))
+aic.fig[['legend']] <- leg
+```
+
+```{r aic.p show, echo = FALSE, fig.align = "center", fig.height = 6.9, fig.width = 9}
+(fig.s2 <- grid.arrange(grobs = aic.fig, ncol = 3, nrow = 3, heights = c(2.3, 2.3, 2.3), widths = c(3, 3, 3)))
+ggsave(file.path(here(), 'data_out', 'results', 'sr_drivers', 'figs', 'Fig_S2_SuppInfo_psd-std.tif'), fig.s2, 
+       device = 'tiff', height = 6.9, width = 9, units = 'in', dpi = 300)
+```
+
+```{r sum plot, include = FALSE, echo = FALSE, message = FALSE, fig.align = "center", fig.height = 7.8, fig.width = 10} 
+
+aic.fig2 <- aic.fig
+aic.fig2[['bar']] <- avgest.bar + xlab('Explanatory Variable') + labs(tag = '(A)') + ggtitle(' ') +
+                          guides(fill = guide_legend(title = "Species Assemblage", 
+                                                     title.position = "top", title.hjust = 0.5),
+                                 color = guide_legend(title = "Species Assemblage", 
+                                                      title.position = "top", title.hjust = 0.5)) +
+                          theme(legend.position = c(0.6, 0.95), 
+                                legend.background = element_rect(fill = 'white', colour = 'black'),
+                                plot.tag.position = c(0.095, 0.985),
+                                axis.title.x = element_text(size = 12, color = 'white'),
+                                plot.title = element_text(hjust = 0.5, size = 14))
+aic.fig2 <- aic.fig2[c("bar", "area", "spread", "topo", "green", "anthro", "iso", "ships", "pop")]
+
+for (i in c(2, 4)) {
+  aic.fig2[[i]] <- aic.fig2[[i]] + labs(tag = paste0('(', LETTERS[i], ')')) +
+                        theme(axis.title.y = element_text(size = 12, color = 'black'),
+                              axis.text.y = element_text(size = 12, color = 'black'),
+                              axis.title.x = element_text(size = 12, color = 'white'),
+                              axis.text.x = element_blank())
+}
+
+for (i in c(3, 5)) {
+  aic.fig2[[i]] <- aic.fig2[[i]] + labs(tag = paste0('(', LETTERS[i], ')')) +
+                        theme(axis.title.y = element_text(size = 12, color = 'white'),
+                              axis.text.y = element_text(size = 12, color = 'black'),
+                              axis.title.x = element_text(size = 12, color = 'white'),
+                              axis.text.x = element_blank())
+}
+
+for (i in 7:9) {
+  aic.fig2[[i]] <- aic.fig2[[i]] + labs(tag = paste0('(', LETTERS[i], ')')) +
+                        theme(axis.title.y = element_text(size = 12, color = 'white'),
+                              axis.text.y = element_text(size = 12, color = 'black'),
+                              axis.title.x = element_text(size = 12, color = 'black'),
+                              axis.text.x = element_blank())
+}
+
+aic.fig2[[6]] <- aic.fig2[[6]] + labs(tag = paste0('(', LETTERS[6], ')')) +
+                        theme(axis.title.y = element_text(size = 12, color = 'black'),
+                                       axis.text.y = element_text(size = 12, color = 'black'),
+                                       axis.title.x = element_text(size = 12, color = 'black'),
+                                       axis.text.x = element_blank())
+
+aic.fig2[[4]] <- aic.fig2[[4]] + ggtitle('Topo. Complexity')
+aic.fig2[[7]] <- aic.fig2[[7]] + ggtitle('Geographic Iso.')
+aic.fig2[[8]] <- aic.fig2[[8]] + ggtitle('Economic Iso.')
+
+lay <- rbind(c(1, 1, 2, 3),
+             c(1, 1, 4, 5),
+             c(6, 7, 8, 9))
+grid.arrange(grobs = aic.fig2, layout_matrix = lay, 
+             widths = c(2.5, 2.5, 2.5, 2.5), heights = c(2.6, 2.6, 2.6))
+```
+
+```{r abbr}
+# Add clade abbreviation for the figures
+cld.abbr <- read.csv(file.path(here(), 'data_out', 'Clade_E_N_SR.csv'), header = TRUE)
+cld.abbr <- cld.abbr[, c('Clade', 'Abbreviation', 'Class')]
+names(cld.abbr) <- c('Clade', 'Abbr', 'Class')
+abbr.ord.gr <- c(1, 2, 13, 10, 5, 14, 16, 15, 18, 6, 8, 7, 9, 11, 12, 3, 17, 4)
+
+aic.p <- merge(aic.p, cld.abbr, by = 'Clade', all = TRUE)
+aic.p$Abbr.GR <- factor(aic.p$Abbr, unique(aic.p$Abbr)[abbr.ord.gr])
+aic.p[which(aic.p$Clade == 'All'), 'Class'] <- 'All'
+```
+
+```{r aic plot2, echo = FALSE}
+aic.fig2 <- vector('list', length(vars))
+names(aic.fig2) <- c('area', 'spread', 'topo', 'green', 'anthro', 'iso', 'ships', 'pop')
+for (i in 1:(length(vars))) {
+  temp <- aic.p[, c('Abbr.GR', 'Assemblage', 'Class', vars[i])]
+  names(temp)[4] <- 'p.Models'
+  p <- ggplot(temp, aes(x = Abbr.GR, y = p.Models, color = Assemblage, fill = Assemblage)) +
+          #geom_bar(stat = 'identity', position = position_dodge(width = 0.9)) +
+          geom_point(aes(shape = Class), size = 1.5, position = position_dodge(width = 0.7)) +
+          geom_vline(aes(xintercept = as.numeric(Abbr.GR) + 0.5), color = 'grey40') +
+          scale_shape_manual(values = c(8, 21, 24)) +
+          scale_color_manual(values = cols) +
+          scale_fill_manual(values = alpha(cols, 0.5)) +
+          scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+          ggtitle(tits.aicFig[vars[i]]) + xlab('Taxonomic Clade') + ylab('Prop. of Top Models') + 
+          labs(tag = paste0('(', LETTERS[i], ')')) + 
+          theme_classic() +
+          theme(legend.position = "none", 
+                axis.title = element_text(size = 12, color = 'black'),
+                axis.text.x = element_text(size = 12, color = 'white'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                plot.title = element_text(hjust = 0.5, size = 14),
+                plot.tag.position = c(0.155, 0.975))
+  
+  if ((i %% 2) == 0) {
+    p <- p + theme(axis.title.y = element_text(angle = 90, size = 12, color = 'white'),
+                   axis.text.y = element_blank())
+  } else {
+    p <- p + theme(plot.tag.position = c(0.155, 0.975))
+  }
+  
+  if (is.element(i, c(1:length(vars)-2))) {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'),
+                   axis.text.x = element_blank())
+  } else {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'black'),
+                   axis.text.x = element_text(size = 10, color = 'black', angle = 90, hjust = 1, vjust = 0.5))
+  }
+  
+  aic.fig2[[i]] <- p
+}
+
+
+#leg <- as_ggplot(get_legend(aic.fig2[[1]] + theme(legend.position = 'right')))
+#aic.fig2[['legend']] <- leg
+```
+
+As is shown in the below figure, the importance of Geographic Isolation is less for many clades in determining the contemporary species richness than native species richness. In addition, Economic Area is important for introduced species but not for native species. Conversely, Topographic complexity and Geographic Area are most important for native and total species richness.
+
+```{r aic.p show2, eval = FALSE, echo = FALSE, fig.align = "center", fig.height = 9, fig.width = 8}
+grid.arrange(grobs = aic.fig2[1:8], ncol = 2, nrow = 4, widths = c(4.09, 3.91), heights = c(rep(2.15, 3), 2.55))
+```
+
+$\space$
+
+No let's see how these results vary across the taxonomic groups. First we will look at the model estimates for all Herpetofauna in the Caribbean.
+
+$\underline{Herpetofauna:}$
+
+```{r SR Herps, fig.align="center", fig.height=4}
+# Native herpetofauna community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'All' & Avg.SR$Group == 'N'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+```{r SR Herps T and E, echo = FALSE, fig.align="center"}
+# Exotic herpetofauna community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'All' & Avg.SR$Group == 'E'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Total herpetofauna community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'All' & Avg.SR$Group == 'T'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+We can see that for Native (Group N) herpetofauna communities there is a stronger curvilinear relationship between SR and Area than there is in the Exotic (Group E) or the Total (Group T) communities. In fact for the Exotic communities the curvilinear relationship has become linear. The other relationships are similar except for the relationship between herpetofauna SR and land cover. For the Native and Total communities, SR is positively related to the percent of green (i.e. natural) land cover. While for the Exotic community, SR is positively related to the percent of anthropogenic land cover.
+
+Now we can see how this compares to other clades starting with the larger clades.
+
+```{r fig.s1 show, echo = FALSE, fig.align = "center", fig.width = 5, fig.height = 8}
+grid.arrange(grobs = fig.s1, ncol = 1, nrow = 3, 
+             widths = 5, heights = c(2.35, 2.35, 3.3))
+```
+
+$\space$
+
+$\space$
+
+
+$\underline{Reptilia:}$
+
+```{r SR Reptilia, echo = FALSE, fig.align="center"}
+# Native Reptilia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Reptilia' & Avg.SR$Group == 'N'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Exotic Reptilia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Reptilia' & Avg.SR$Group == 'E'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Total Reptilia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Reptilia' & Avg.SR$Group == 'T'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+
+$\space$
+
+
+$\underline{Amphibia:}$
+
+```{r SR Amphibia, echo = FALSE, fig.align="center"}
+# Native Amphibia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Amphibia' & Avg.SR$Group == 'N'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Exotic Amphibia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Amphibia' & Avg.SR$Group == 'E'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Total Amphibia community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Amphibia' & Avg.SR$Group == 'T'), ]
+order <- c(1, 3, 9, 4, 5, 2, 8, 6, 7)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+```
+
+Now let's look at the clades of lower taxonomic level. We will highlight *Anolis* and *Eleutherodactylus* (the most speciose tetrapod genera) by showing their estimates in tables below the figure. 
+
+```{r fig.3 data, echo = FALSE, fig.align = "center", fig.height = 10, fig.width = 7}
+Avg.est <- droplevels(Avg.SR[which(Avg.SR$Taxon != 'Anura' & Avg.SR$Taxon != 'All'), ])
+
+vars.fig3 <- c('Area', 'Spread', 'DEM.sd', 'green', 'anthro', 'source', 'econ_iso', 'pop_dens')
+tits.F3 <- c("Geographic Area", "Island Spread", "Topographic Complexity", "Natural Habitat", 
+             "Economic Area", "Geographic Isolation", "Economic Isolation", 
+             "Population Density")
+panels.F3 <- LETTERS[1:length(tits.F3)]
+panels.F3 <- paste0('(', panels.F3)
+panels.F3 <- paste0(panels.F3, ')')
+
+cld.abbr <- read.csv(file.path(here(), 'data_out', 'Clade_E_N_SR.csv'), header = TRUE)
+cld.abbr <- cld.abbr[, c('Clade', 'Abbreviation', 'Class')]
+names(cld.abbr) <- c('Taxon', 'Abbr', 'Class')
+Avg.est <- merge(Avg.est, cld.abbr, by = 'Taxon', all = TRUE)
+abbr.ord.gr <- c(1, 2, 13, 10, 5, 14, 16, 15, 18, 6, 8, 7, 9, 11, 12, 3, 17, 4)
+Avg.est$Abbr.GR <- factor(Avg.est$Abbr, unique(Avg.est$Abbr)[abbr.ord.gr])
+
+Avg.est[which(Avg.est$Taxon == 'All'), 'Class'] <- 'All'
+Avg.est$Group <- as.factor(Avg.est$Group)
+
+scaleFUN <- function(x) sprintf("%.1f", x)
+```
+
+```{r fig.3, fig.align = "center", fig.height = 9, fig.width = 7}
+fig.3 <- vector('list', length(vars.fig3))
+names(fig.3) <- c('area', 'spread', 'topo', 'green', 'anthro', 'iso', 'ships', 'pop')
+for (i in 1:(length(vars.fig3))) {
+  temp <- droplevels(Avg.est[which(Avg.est$Variable == vars.fig3[i] & Avg.est$Abbr.GR != 'Herp'), ])
+  p <- ggplot(temp, aes(x = Abbr.GR, y = Estimate, color = Assemblage, shape = Class, fill = Fills)) +
+          geom_hline(yintercept = 0, linetype = 'dotted', color = 'gray30') +
+          geom_errorbar(aes(ymin = LCL, ymax = UCL), position = position_dodge(width = 0.7),
+                        width = 0, size = 1) +
+          geom_point(size = 2, position = position_dodge(width = 0.7)) +
+          scale_color_manual(values = cols) +
+          scale_shape_manual(values = c(21, 24)) +
+          scale_fill_manual(values = UINT.cols[intersect(names(UINT.cols), unique(temp$Fills))]) +
+          scale_y_continuous(labels = scaleFUN) +
+          ggtitle(tits.F3[i]) + xlab('Taxonomic Clade') + labs(tag = panels.F3[i]) +
+          theme_classic() +
+          theme(legend.position = "none", axis.title = element_text(size = 12, color = 'black'),
+                axis.text.x = element_text(angle = 90, size = 12, hjust = 1, vjust = 0.5, color = 'black'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                plot.title = element_text(hjust = 0.5, size = 14),
+                plot.tag.position = c(0.155, 0.975))
+  
+  if ((i %% 2) == 0) {
+    p <- p + theme(axis.title.y = element_text(angle = 90, size = 12, color = 'white'))
+  } else {
+    p <- p + theme(plot.tag.position = c(0.155, 0.975))
+  }
+  
+  if (is.element(i, c(1:length(vars.fig3)-2))) {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'),
+                   axis.text.x = element_blank())
+  } else {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'))
+  }
+  
+  fig.3[[i]] <- p
+}
+
+```
+
+```{r fig.3 show, include = FALSE, echo = FALSE, fig.align = "center", fig.height = 9, fig.width = 8}
+# All Variables together
+grid.arrange(grobs = fig.3, ncol = 2, nrow = 4, widths = c(4.09, 3.91), heights = c(rep(2.15, 3), 2.55))
+```
+
+$\space$
+
+$\space$
+
+$\underline{Natural \space Variables:}$
+```{r fig.3 nat, echo = FALSE, fig.align = "center", fig.height = 7, fig.width = 9, message = FALSE}
+vars.fig3.n <- c('Area', 'Spread', 'DEM.sd', 'green', 'source')
+fig.3.n <- vector('list', length(vars.fig3.n))
+names(fig.3.n) <- c("area", "spread", "topo", "green", "iso")
+tits.F3.n <- c("Geographic Area", "Island Spread", "Topographic Complexity", "Natural Area", 
+               "Geographic Isolation")
+
+for (i in 1:(length(vars.fig3.n))) {
+  temp <- droplevels(Avg.est[which(Avg.est$Variable == vars.fig3.n[i] & Avg.est$Abbr.GR != 'Herp'), ])
+  p <- ggplot(temp, aes(x = Abbr.GR, y = Estimate, color = Assemblage, shape = Class, fill = Fills)) +
+          geom_hline(yintercept = 0, linetype = 'dotted', color = 'gray30') +
+          geom_errorbar(aes(ymin = LCL, ymax = UCL), position = position_dodge(width = 0.7),
+                        width = 0, size = 1) +
+          geom_point(size = 2, position = position_dodge(width = 0.7)) +
+          scale_color_manual(values = cols) +
+          scale_shape_manual(values = c(21, 24)) +
+          scale_fill_manual(values = UINT.cols[intersect(names(UINT.cols), unique(temp$Fills))]) +
+          scale_y_continuous(labels = scaleFUN) +
+          ggtitle(tits.F3.n[i]) + xlab('Taxonomic Clade') + ylab('Coefficient') + labs(tag = panels.F3[i]) +
+          theme_classic() +
+          theme(legend.position = "none", axis.title = element_text(size = 12, color = 'black'),
+                axis.text.x = element_text(angle = 90, size = 12, hjust = 1, vjust = 0.5, color = 'black'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                plot.title = element_text(hjust = 0.5, size = 14),
+                plot.tag.position = c(0.155, 0.975))
+  
+  if (is.element(i, c(2, 4))) {
+    p <- p + theme(axis.title.y = element_text(angle = 90, size = 12, color = 'white'),
+                   axis.text.y = element_text(size = 12, color = 'black'))
+  } else {
+    p <- p + theme(plot.tag.position = c(0.155, 0.975))
+  }
+  
+  if (is.element(i, c(1:length(vars.fig3.n)-1))) {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'),
+                   axis.text.x = element_blank())
+  }
+  
+  fig.3.n[[i]] <- p
+}
+
+leg <- as_ggplot(get_legend(fig.3.n[[1]] + guides(fill = FALSE) + 
+                              theme(legend.position = 'right', legend.box = 'horizontal')))
+fig.3.n[['legend']] <- leg
+
+(fig_4 <- grid.arrange(grobs = fig.3.n, ncol = 2, nrow = 3, widths = c(4.5, 4.5), heights = c(2.17, 2.17, 2.66)))
+```
+
+```{r fig.4 nat save}
+ggsave(file.path(here(), 'data_out', 'results', 'sr_drivers', 'figs', 'Fig_5_psd-std.tif'), fig_4, 
+       device = 'tiff', height = 7, width = 9, units = 'in', dpi = 300)
+
+```
+
+$\space$
+
+$\space$
+
+$\underline{Anthropogenic \space Variables:}$
+```{r fig.3 anth, echo = FALSE, fig.align = "center", fig.height = 4.83, fig.width = 9}
+vars.fig3.a <- c('anthro', 'econ_iso', 'pop_dens')
+fig.3.a <- vector('list', length(vars.fig3.a))
+names(fig.3.a) <- c("anthro", "ships", "pop")
+tits.F3.a <- c("Economic Area", "Economic Isolation", "Population Density")
+
+for (i in 1:(length(vars.fig3.a))) {
+  temp <- droplevels(Avg.est[which(Avg.est$Variable == vars.fig3.a[i] & Avg.est$Abbr.GR != 'Herp'), ])
+  p <- ggplot(temp, aes(x = Abbr.GR, y = Estimate, color = Assemblage, shape = Class, fill = Fills)) +
+          geom_hline(yintercept = 0, linetype = 'dotted', color = 'gray30') +
+          geom_errorbar(aes(ymin = LCL, ymax = UCL), position = position_dodge(width = 0.7),
+                        width = 0, size = 1) +
+          geom_point(size = 2, position = position_dodge(width = 0.7)) +
+          scale_color_manual(values = cols) +
+          scale_shape_manual(values = c(21, 24)) +
+          scale_fill_manual(values = UINT.cols[intersect(names(UINT.cols), unique(temp$Fills))]) +
+          scale_y_continuous(labels = scaleFUN) +
+          ggtitle(tits.F3.a[i]) + xlab('Taxonomic Clade') + ylab('Coefficient') + labs(tag = panels.F3[i]) +
+          theme_classic() +
+          theme(legend.position = "none", axis.title = element_text(size = 12, color = 'black'),
+                axis.text.x = element_text(angle = 90, size = 12, hjust = 1, vjust = 0.5, color = 'black'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                plot.title = element_text(hjust = 0.5, size = 14),
+                plot.tag.position = c(0.155, 0.975))
+  
+  if (i == 2) {
+    p <- p + theme(axis.title.y = element_text(angle = 90, size = 12, color = 'white'),
+                   axis.text.y = element_text(size = 12, color = 'black'))
+  } else {
+    p <- p + theme(plot.tag.position = c(0.155, 0.975))
+  }
+  
+  if (is.element(i, 1:2)) {
+    p <- p + theme(axis.title.x = element_text(size = 12, color = 'white'),
+                   axis.text.x = element_blank())
+  }
+  
+  fig.3.a[[i]] <- p
+}
+
+
+leg <- as_ggplot(get_legend(fig.3.a[[1]] + guides(fill = FALSE) + 
+                              theme(legend.position = 'right', legend.box = 'horizontal')))
+fig.3.a[['legend']] <- leg
+
+(fig_5 <- grid.arrange(grobs = fig.3.a, ncol = 2, nrow = 2, widths = c(4.5, 4.5), heights = c(2.17, 2.66)))
+```
+
+```{r fig.5 nat save}
+ggsave(file.path(here(), 'data_out', 'results', 'sr_drivers', 'figs', 'Fig_6_psd-std.tif'), fig_5, 
+       device = 'tiff', height = 4.83, width = 9, units = 'in', dpi = 300)
+
+```
+
+We can also look at the largest reptile and amphibian genera in the Caribbean oth of which are of great interest to evolutionary and macroecologists.
+
+$\space$
+
+$\underline{Anolis:}$
+
+```{r SR Anolis, echo = FALSE, fig.align="center"}
+# Native Anolis community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Anolis' & Avg.SR$Group == 'N'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Exotic Anolis community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Anolis' & Avg.SR$Group == 'E'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Total Anolis community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Anolis' & Avg.SR$Group == 'T'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+$\underline{Eleutherodactylus:}$
+```{r SR Eleutherodactylus, echo = FALSE, fig.align="center"}
+# Native Eleutherodactylus community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Eleutherodactylus' & Avg.SR$Group == 'N'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Exotic Eleutherodactylus community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Eleutherodactylus' & Avg.SR$Group == 'E'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+
+# Total Eleutherodactylus community
+tmp <- Avg.SR[which(Avg.SR$Taxon == 'Eleutherodactylus' & Avg.SR$Group == 'T'), ]
+order <- c(1, 3, 6, 9, 8, 7, 10, 4, 2, 5)
+tmp$Variable <- factor(tmp$Variable, levels(as.factor(tmp$Variable))[order])
+tmp <- tmp[order(tmp$Variable), ]
+tmp$Sig <- ' '
+tmp[which(tmp$LCL < 0 & tmp$UCL < 0), 'Sig'] <- '*'
+tmp[which(tmp$LCL > 0 & tmp$UCL > 0), 'Sig'] <- '*'
+
+tab <- flextable(tmp[, c('Taxon', 'Assemblage', 'Variable', 'Estimate', 'LCL', 'UCL', 'Sig')])
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:3, align = "right")
+tab <- align(tab, j = 7, align = "left")
+tab <- color(tab, i = 1, j = 7, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '*')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+We can see that overall the relationships are similar across taxonomic groups. However, some interesting differences are apparent. 
+
+First, for reptiles, higher DEM.sd (elevation variability) increases native SR, but all other relationships are similar to that of all herpetofauna. The importance of DEM.sd also comes out in the Amphibian. However, this may be due to its slightly high correlation with the bumber of ship visits since the amount of trade tends to increase exotic species propagule pressure. In addition, we can see that area becomes less important for SR as we move to smaller (and younger) taxonomic clades.
+
+
+$\space$
+
+$\space$
+
+
+# Average Model Fit
+
+So far none of our analysis tells us whether or not our averaged models are actually good for describing the patterns of SR in the Caribbean. For that we need to calculate the R^2^ for the averaged model. This is done using the `r_squared` function in the 'caribmacro' package.
+
+```{r R Squared}
+data <- lm.sr[['Data']]
+vars2 <- attr(lm.sr[['Models']][[1]]$terms,'term.labels')
+
+nams<-strsplit(names(data), ".", fixed = TRUE)
+nams<-data.frame(matrix(unlist(nams), nrow = length(nams), byrow = TRUE))
+names(nams) <- c('Taxon', 'Group')
+nams$Taxon <- as.character(nams$Taxon)
+nams$Group <- as.character(nams$Group)
+
+R.sq_sr <- data.frame(NULL)
+system.time(for (i in 1:length(data)) {
+  temp <- Avg.SR[which(Avg.SR$Taxon == nams[i, 'Taxon'] &
+                       Avg.SR$Group == nams[i, 'Group']), c('Variable', 'Estimate')]
+
+  if (any(!is.na(temp$Estimate))) {
+
+    tmp <- r_squared(temp,
+                     data = data[[i]],
+                     response = names(data)[i],
+                     x_vars = vars2,
+                     display = FALSE)
+  } else {
+    tmp <- data.frame(R.sq = NA,
+                      adj.R.sq = NA)
+  }
+
+  tmp <- cbind(nams[i, ], tmp)
+  R.sq_sr <- rbind(R.sq_sr, tmp)
+})
+```
+
+```{r write r_sq}
+write.csv(R.sq_sr, file.path(here(), 'data_out', 'SR_Drivers_R_sq.csv'), row.names=FALSE)
+```
+
+If we just look at the R^2^ values for the groups we explored before, we can see that the SR models fit very nicely with exception of Exotic Eleutherodactylus community. However, the PSV models do not fit as well and only the PSV models for large clades or the the models with zeros consistantly had R^2^ values above 0.33 but not nearly as high as the SR models.
+
+## R Squared Values
+
+$\space$
+
+$\underline{Herpetofauna:}$
+
+```{r Herp R squared, fig.align="center"}
+tmp <- R.sq_sr[which(R.sq_sr$Taxon == 'All'), ]
+
+tmp$Sig <- ' '
+tmp[which(tmp$R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$adj.R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$R.sq > 0.33 & tmp$adj.R.sq > 0.33), 'Sig'] <- '**'
+tmp <- tmp[order(tmp$Group), c("Taxon", "Group", "R.sq", "adj.R.sq", "Sig")]
+
+tab <- flextable(tmp)
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:2, align = "right")
+tab <- align(tab, j = 3:4, align = "left")
+tab <- color(tab, i = 1, j = 5, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '**')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+$\underline{Reptilia:}$
+```{r Rept R squared, echo = FALSE}
+tmp <- R.sq_sr[which(R.sq_sr$Taxon == 'Reptilia'), ]
+
+tmp$Sig <- ' '
+tmp[which(tmp$R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$adj.R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$R.sq > 0.33 & tmp$adj.R.sq > 0.33), 'Sig'] <- '**'
+tmp <- tmp[order(tmp$Group), c("Taxon", "Group", "R.sq", "adj.R.sq", "Sig")]
+
+tab <- flextable(tmp)
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:2, align = "right")
+tab <- align(tab, j = 3:4, align = "left")
+tab <- color(tab, i = 1, j = 5, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '**')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+$\underline{Amphibia:}$
+```{r Amph R squared, echo = FALSE, fig.align="center"}
+tmp <- R.sq_sr[which(R.sq_sr$Taxon == 'Amphibia'), ]
+
+tmp$Sig <- ' '
+tmp[which(tmp$R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$adj.R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$R.sq > 0.33 & tmp$adj.R.sq > 0.33), 'Sig'] <- '**'
+tmp <- tmp[order(tmp$Group), c("Taxon", "Group", "R.sq", "adj.R.sq", "Sig")]
+
+tab <- flextable(tmp)
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:2, align = "right")
+tab <- align(tab, j = 3:4, align = "left")
+tab <- color(tab, i = 1, j = 5, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '**')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+$\underline{Anolis:}$
+```{r Anol R squared, echo = FALSE, fig.align="center"}
+tmp <- R.sq_sr[which(R.sq_sr$Taxon == 'Anolis'), ]
+
+tmp$Sig <- ' '
+tmp[which(tmp$R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$adj.R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$R.sq > 0.33 & tmp$adj.R.sq > 0.33), 'Sig'] <- '**'
+tmp <- tmp[order(tmp$Group), c("Taxon", "Group", "R.sq", "adj.R.sq", "Sig")]
+
+tab <- flextable(tmp)
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:2, align = "right")
+tab <- align(tab, j = 3:4, align = "left")
+tab <- color(tab, i = 1, j = 5, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '**')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+$\underline{Eleutherodactylus:}$
+```{r Eleu R squared, echo = FALSE, fig.align="center", fig.width = 4}
+tmp <- R.sq_sr[which(R.sq_sr$Taxon == 'Eleutherodactylus'), ]
+
+tmp$Sig <- ' '
+tmp[which(tmp$R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$adj.R.sq > 0.33), 'Sig'] <- '*'
+tmp[which(tmp$R.sq > 0.33 & tmp$adj.R.sq > 0.33), 'Sig'] <- '**'
+tmp <- tmp[order(tmp$Group), c("Taxon", "Group", "R.sq", "adj.R.sq", "Sig")]
+
+tab <- flextable(tmp)
+tab <- colformat_double(tab, digits = 3)
+tab <- align(tab, align = "center")
+tab <- align(tab, j = 1:2, align = "right")
+tab <- align(tab, j = 3:4, align = "left")
+tab <- color(tab, i = 1, j = 5, color = "grey90", part = "header")
+tab <- bold(tab, i = ~ Sig == '**')
+tab <- width(tab, j = 'Sig', width = 0.1)
+tab <- bg(tab, bg = 'grey90', part = 'all')
+theme_vanilla(tab)
+```
+
+$\space$
+
+$\space$
+
+```{r r_sq data, echo = FALSE}
+options(na.action = "na.omit")
+
+st.err <- function(x) {sd(x)/sqrt(length(x))}
+
+tmp <- unique(Avg.est[, c("Taxon", "Group", "Abbr", "Class")])
+
+abbr.ord.sr <- c(1, 14, 16, 2, 13, 11, 15, 3, 5, 6, 8, 18, 10, 17, 12, 4, 7, 9)
+tmp$Abbr.SR <- factor(tmp$Abbr, unique(tmp$Abbr)[abbr.ord.sr])
+
+R.sq_sr <- merge(R.sq_sr, tmp, by = c('Taxon', 'Group'), all = TRUE)
+
+R.sq_sr <- droplevels(R.sq_sr[which(R.sq_sr$Taxon != 'Anura'), ])
+R.sq_sr[which(R.sq_sr$Group == 'N'), 'Group'] <- 'Native'
+R.sq_sr[which(R.sq_sr$Group == 'E'), 'Group'] <- 'Introduced'
+R.sq_sr[which(R.sq_sr$Group == 'T'), 'Group'] <- 'Total'
+
+avg.r.sq <- merge(aggregate(R.sq ~ Class + Group, 
+                            data = droplevels(R.sq_sr[which(R.sq_sr$Taxon != 'All'), ]), mean),
+                  aggregate(R.sq ~ Class + Group, 
+                            data = droplevels(R.sq_sr[which(R.sq_sr$Taxon != 'All'), ]), st.err),
+                  by = c('Class', 'Group'), all = TRUE)
+
+names(avg.r.sq) <- c("Class", "Group", "R.sq", "SE")
+
+```
+
+```{r r_sq figA, echo = FALSE, fig.align = "center", fig.height = 2, fig.width = 2}
+r_sq.fig.A <- ggplot(avg.r.sq, aes(x = Class, y = R.sq, fill = Group, color = Group)) +
+                geom_bar(stat = 'identity', width=0.75, position = position_dodge()) +
+                geom_errorbar(aes(ymin = R.sq - SE, ymax = R.sq + SE), position = position_dodge(.75),
+                              width = 0.25, color = 'black') +
+                scale_fill_manual(values = cols) +
+                scale_color_manual(values = cols) +
+                scale_x_discrete(limits = levels(avg.r.sq$Class),
+                                 labels = c('Amphibian', 'Reptile')) +
+                ylab(expression('Mean '~R^2~' ('%+-%'SE)')) + scale_y_continuous(expand = c(0, 0)) +
+                theme_minimal() +
+                theme(legend.position = 'none',
+                      axis.line.y = element_line(color = 'black'),
+                      axis.text.y = element_text(size = 10, color = 'black'),
+                      axis.title.y = element_text(size = 12),
+                      axis.ticks.y = element_line(color = 'black'),
+                      panel.grid.major.x = element_blank(),
+                      axis.text.x = element_text(size = 10, color = 'black'),
+                      axis.title.x = element_blank())
+#r_sq.fig.A
+```
+
+```{r r_sq figB, echo = FALSE, fig.align = "center", fig.height = 4, fig.width = 6}
+r_sq.fig.B <- ggplot(droplevels(R.sq_sr[which(R.sq_sr$Taxon != 'All'), ]), 
+                                aes(x = Abbr.SR, y = R.sq, color = Group, fill = Group)) +
+          geom_bar(stat = 'identity', position = position_dodge()) +
+          scale_color_manual(values = cols) +
+          scale_fill_manual(values = cols) +
+          scale_y_continuous(labels = scaleFUN, expand = c(0, 0)) +
+          xlab('\nTaxonomic Clade') + ylab(expression('Model Fit  ('~R^2~')')) +
+          theme_minimal() +
+          theme(legend.position = 'none',
+                axis.line.y = element_line(color = 'black'),
+                axis.text.y = element_text(size = 12, color = 'black'),
+                axis.title.y = element_text(size = 14, color = 'black'),
+                axis.ticks.y = element_line(color = 'black'),
+                panel.grid.major.x = element_blank(),
+                axis.title.x = element_text(size = 14, color = 'black'),
+                axis.text.x = element_text(size = 12, angle = 90, hjust = 1, vjust = 0.5, 
+                                                 color = 'black'))
+#r_sq.fig.B
+```
+
+```{r r_sq play, echo = FALSE, message = FALSE, fig.align = "center", fig.height = 4, fig.width = 8}
+r_sq.tmp1 <- r_sq.fig.A + labs(tag = '(B)') + 
+                  theme(axis.title.y = element_text(size = 10),
+                        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+r_sq.tmp2 <- r_sq.fig.B + labs(tag = '(A)')+ 
+                  theme(axis.title.x = element_text(size = 12))
+
+leg <- as_ggplot(get_legend(r_sq.tmp2 + guides(fill = guide_legend(title = 'Assemblage'), color = FALSE) + 
+                              theme(legend.position = 'right')))
+
+lay <- rbind(c(1, 2),
+             c(1, 2),
+             c(1, 3),
+             c(1, 3))
+(fig_s1 <- grid.arrange(grobs = list(r_sq.tmp2, r_sq.tmp1, leg), layout_matrix = lay, 
+                        widths = c(6, 2), heights = c(1.25, 1, 1, 0.75)))
+```
+
+```{r figS1 save, echo = FALSE}
+ggsave(file.path(here(), 'data_out', 'results', 'sr_drivers', 'figs', 'Fig_S1_SuppInfo_psd-std.tif'), fig_s1, 
+       device = 'tiff', height = 4, width = 8, units = 'in', dpi = 300)
+```
+***
+
+<center>
+**$$\underline{END}$$**
+</center>
+

@@ -1,0 +1,50 @@
+url: https://gledits2.github.io/caribmacro/
+home:
+  links:
+  - text: iEco Lab
+    href: https://www.iecolab.org
+  - text: Center for Biodiversity
+    href: www.biodiversitycenter.org
+  - text: Temple University Biology
+    href: https://bio.cst.temple.edu
+  - text: Ecology Earth Engine
+    href: https/addadress
+  - text: Data Management Book
+    href: https/addadress
+template:
+  params:
+    bootswatch: slate
+navbar:
+  right:
+  - icon: fa-home fa-lg
+    href: index.html
+  - text: Reference
+    href: reference/index.html
+  - text: Contemporized IBT
+    menu:
+    - text: '----------------'
+    - text: Data Calculations
+      href: articles/010_ibt_data_calcs.html
+    - text: Bank Attributes
+      href: articles/011_bank_attributes.html
+    - text: Contemporized IBT Analysis
+      href: articles/020_ibt_sr_avgmod_std.html
+    - text: '----------------'
+  - text: Island Saturation Rescaling
+    menu: ~
+  - text: Beta Diversity
+    menu: ~
+  - text: Shipping Networks & IBT
+    menu: ~
+  - text: Misc R Code
+    menu:
+    - text: '----------------'
+    - text: Functions
+      href: articles/900_functions.html
+    - text: Sp Records Updates
+      href: articles/910_records_update.html
+    - text: '----------------'
+  left:
+  - icon: fa-github fa-lg
+    href: https://github.com/gledits2/caribmacro
+

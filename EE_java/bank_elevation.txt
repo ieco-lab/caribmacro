@@ -1,0 +1,37 @@
+// load data
+// "users/jmg5214/caribmacro_banks" can be found in the caribmacro GitHub
+// at https://github.com/gledits2/caribmacro/tree/master/data_raw/gis
+
+var dem = ee.Image("CGIAR/SRTM90_V4"),
+    banks = ee.FeatureCollection("users/jmg5214/caribmacro_banks");
+
+// Load ecoEE extract module
+var ecoEE = require('users/ieco/ecoEE-js:modules/module-extractMultiPolygon.js');
+
+// Caribbean DEM Extracts
+print(dem);
+
+var demCarib = dem.clip(banks);
+
+print(demCarib.bandNames());
+
+var band = 0;
+var vals = ecoEE.extractMultiPolygon(banks, demCarib, band);
+
+// Visualize Caribbean DEM Data
+var DEM_Vis = {
+  min: -100.0,
+  max: 3000.0,
+  palette: ['000000', 'FFFF00', 'FF0000'],
+};
+
+Map.setCenter(-69.0818, 20.2622, 5);
+Map.addLayer(banks, {color:"red"}, "banks");
+Map.addLayer(demCarib, DEM_Vis, "DEM Carib");
+
+// Export extract module output to Google Drive
+Export.table.toDrive({
+  collection: vals,
+  description: 'Bank_Elevation',
+  fileFormat: 'CSV'
+});
