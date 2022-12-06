@@ -1,6 +1,6 @@
 # Caribbean Macrosystems
 
-The associated R package is still being formed and used with unpulblished data. If you want access to the package contact maintainer.
+The associated R package is still being formed and used with unpulblished data. If you want access to the package or the raw data please contact the author [Jason M. Gleditsch](mailto:jason.gleditsch@temple.edu) or author [Matthew R. Helmus](mailto:mrhelmus@temple.edu).
 
 Most recently associated publication is Gleditsch et al. 2022 which is currently in press for the journal Global Ecology and Biogeography. The DOI will be inserted here upon publication.
 

@@ -11,8 +11,6 @@ output:
     toc_depth: 3
 ---
 
-_**HI I CHANGED SOMETHING**_
-
 # Aim and Scope
 
 Here we calculate the necessary data for the Island Biogeographic Analyses of the Caribbean Herpetofauna. We will be determining the species richness (SR) and phylogenetic species variability (PSV) for each island bank in the Caribbean. Each of these values are going to be calculated for various species groups (i.e. clades) as determined by the taxonomic hierarchies for the reptile and amphibian species present in the Caribbean Bioregion as delineated by Hedges et al. (2019) and including Bermuda.
@@ -47,7 +45,7 @@ devtools::load_all("./", export_all = FALSE)
 
 The other R packages needed for this are:
 
-```{r required packages, message = FALSE}
+```{r required packages, message = TRUE}
 library(here)
 library(reshape)
 library(readr)

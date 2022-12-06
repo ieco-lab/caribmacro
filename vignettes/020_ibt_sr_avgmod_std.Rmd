@@ -67,13 +67,14 @@ library(caper)
 
 ```
 
-Now lets load in the important data from the 'data_out' folder and make last minute changes
+Now lets load in the species richness data and the bank attributes data. 
 
-```{r data load, message=FALSE}
-# Load in data
+```{r data load}
 SR <- read.csv(file.path(here(), 'data_out', 'sr_drivers', 'SR_Drivers_Herp_SR.csv'), header = TRUE)
 bank_dat <- read.csv(file.path(here(), 'data_out', 'IBT_Bank_Data.csv'), header = TRUE)
+```
 
+```{r data prep}
 # Make bank in the format of row names
 bank_dat$bank<-gsub(".", " ", bank_dat$bank, fixed = TRUE)
 
@@ -83,6 +84,47 @@ bank_dat$pop_dens <- bank_dat$pop_avg/bank_dat$Area
 
 # Invert the Ships Variable
 bank_dat$econ_iso <- 1/(bank_dat$ships + 1)
+```
+
+These data can also be found on Dryad at [https://doi.org/10.5061/dryad.vx0k6djtn](https://doi.org/10.5061/dryad.vx0k6djtn). If you download those data, then skip the Data Checking section and go straight to the Species Richness Analysis section after running the following code.
+
+You can download the files manually or by using the 'rdryad' package ([https://github.com/ropensci/rdryad](https://github.com/ropensci/rdryad)).
+
+```{r dryad data, eval = FALSE}
+SR <- read.csv(file.path(here(), 'data_out', 'sr_drivers', 'supp_info', 'dryad', 'Gleditsch_et_al_Caribbean_Herp_SR.csv'), header = TRUE)
+bank_dat <- read.csv(file.path(here(), 'data_out', 'sr_drivers', 'supp_info', 'dryad', 'Gleditsch_et_al_Caribbean_Bank_Data.csv'), header = TRUE)
+
+# Transform the SR data into a wide format so that there is a row for each bank 
+SR[which(SR$Clade == 'All Herpetofauna'), 'Clade'] <- 'All'
+clds <- levels(as.factor(SR$Clade))
+out <- SR[which(SR$Clade == 'All'), c("Bank", "Introduced_SR", "Native_SR", "Total_SR")]
+names(out) <- c('bank', paste('All', c('E', 'N', 'T'), sep = '.'))
+for (i in 2:length(clds)) {
+  tmp <- SR[which(SR$Clade == clds[i]), c("Bank", "Introduced_SR", "Native_SR", "Total_SR")]
+  names(tmp) <- c('bank', paste(clds[i], c('E', 'N', 'T'), sep = '.'))
+  out <- merge(out, tmp, by = 'bank', all = TRUE)
+  if (nrow(out) != nrow(tmp)) {
+    stop('Error in merge; NAs produced')
+  }
+  rm(tmp)
+}
+SR <- out
+rm(out)
+
+
+# Change the names of the columns in the bank data to match what is used in the analysis
+## -> bank = Bank
+## -> Number = Number_of_Islands
+## -> Area = Geographic_Area
+## -> source = Geographic_Isolation
+## -> Spread = Island_Spread
+## -> econ_iso = Economic_Isolation
+## -> pop_avg = Average_Population
+## -> DEM.sd = Topographic_Complexity
+## -> anthro = Anthropogenic_Habitat
+## -> green = Green_Habitat
+names(bank_dat) <- c("bank", "Number", "Area", "source", "Spread", "econ_iso", "pop_avg", "DEM.sd", "anthro", "green")
+
 ```
 
 
@@ -170,7 +212,7 @@ nod.v <- vars
 
 ## Clade Select
 
-It is important that we only retain the species groups that are found on enough island banks to have enough statistical power to determine the relationship.
+It is important that we only retain the species groups that are found on enough island banks to have enough statistical power to determine the relationship. The data found on Dryad have already been reduced to the clades with enough statistical power, and therefore, if using that data, skip to the Create SR Models section.
 
 To determine the ideal number of banks needed to have a power of 0.8, we will use the `pwr.f2.test` function in the 'pwr' package. For this, we will need to estimate the R^2^ of the SARs. We will use the SAR for all of the reptile and amphibian species to estimate the desired R^2^. 
 

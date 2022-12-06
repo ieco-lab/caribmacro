@@ -1,4 +1,4 @@
-url: https://gledits2.github.io/caribmacro/
+url: https://ieco-lab.github.io/caribmacro/
 home:
   links:
   - text: iEco Lab
@@ -46,5 +46,5 @@ navbar:
     - text: '----------------'
   left:
   - icon: fa-github fa-lg
-    href: https://github.com/gledits2/caribmacro
+    href: https://github.com/ieco-lab/caribmacro
 

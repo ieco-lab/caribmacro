@@ -1,7 +1,7 @@
 Package: caribmacro
 Type: Package
 Title: Caribbean Macrosystems
-Version: 0.1.0
+Version: 1.1.0
 Authors@R: as.person(c(
     "Jason M. Gleditsch <jmg5214@gmail.com> [aut, cre]",
     "Matthew R. Helmus <mrhelmus@temple.edu> [aut]",
@@ -31,4 +31,4 @@ Imports:
     AICcmodavg,
     ggplot2,
     gridExtra
-URL: https://gledits2.github.io/caribmacro/
+URL: https://ieco-lab.github.io/caribmacro/
